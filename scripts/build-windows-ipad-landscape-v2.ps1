@@ -1,0 +1,26 @@
+$ErrorActionPreference = "Stop"
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$sourceRoot = Join-Path $projectRoot "src"
+$releaseRoot = Join-Path $projectRoot "release"
+$buildRoot = Join-Path $projectRoot "build\windows-ipad-landscape-v2"
+
+Push-Location $projectRoot
+try {
+    & py -3.13 -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --onefile `
+        --windowed `
+        --paths $sourceRoot `
+        --name "PokemonGO-Renamer" `
+        --distpath $releaseRoot `
+        --workpath $buildRoot `
+        --specpath $buildRoot `
+        (Join-Path $projectRoot "launcher_ipad_landscape_v2.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller build failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}

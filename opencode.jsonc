@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/qwen3.5:27b",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local only)",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      },
+      "models": {
+        "qwen3.5:27b": {
+          "name": "Qwen3.5 27B local",
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "iphone_safe": {
+      "type": "local",
+      "command": [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/run-safe-mcp.ps1"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    }
+  },
+  "permission": {
+    "webfetch": "ask",
+    "websearch": "ask",
+    "bash": "ask",
+    "edit": "ask",
+    "write": "ask",
+    "iphone_safe_*": "allow"
+  }
+}
+

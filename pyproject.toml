@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pogo-iphone-renamer"
+version = "0.1.0"
+description = "Deterministic local OCR assistant for supervised Pokemon GO appraisal renaming"
+requires-python = ">=3.11"
+dependencies = [
+    "onnxruntime>=1.20",
+    "Pillow>=10.4",
+    "rapidocr>=3.9",
+]
+
+[project.gui-scripts]
+pogo-ipad-renamer = "pogo_iphone_renamer.gui_ipad_landscape_v9:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
