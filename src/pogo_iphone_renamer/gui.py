@@ -20,7 +20,7 @@ from .prompts import READ_ONLY_PROMPT, rename_prompt
 
 
 APP_TITLE = "Pokémon GO 整理助手"
-DEFAULT_MCP_URL = "http://192.168.68.67:8090/mcp"
+DEFAULT_MCP_URL = "http://127.0.0.1:8090/mcp"
 DEFAULT_MODEL = "qwen3.8:27b"
 
 

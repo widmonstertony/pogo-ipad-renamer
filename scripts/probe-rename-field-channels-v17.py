@@ -12,8 +12,8 @@ SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
-os.environ.setdefault("IPHONE_MCP_URL", "http://192.168.68.61:8090/mcp")
-os.environ.setdefault("IPHONE_MCP_HEALTH_URL", "http://192.168.68.61:8090/health")
+os.environ.setdefault("IPHONE_MCP_URL", "http://127.0.0.1:8090/mcp")
+os.environ.setdefault("IPHONE_MCP_HEALTH_URL", "http://127.0.0.1:8090/health")
 os.environ.setdefault("POKEMON_GO_BUNDLE_ID", "com.nianticlabs.pokemongo")
 os.environ.setdefault("POGO_WRITE_ENABLED", "true")
 os.environ.setdefault("POGO_BATCH_LIMIT", "1")

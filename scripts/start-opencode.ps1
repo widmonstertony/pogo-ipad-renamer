@@ -22,7 +22,7 @@ if (Test-Path -LiteralPath $envFile) {
 }
 
 if (-not $env:POGO_MCP_URL) {
-    $env:POGO_MCP_URL = "http://192.168.68.61:8090/mcp"
+    $env:POGO_MCP_URL = "http://127.0.0.1:8090/mcp"
 }
 
 # OPENCODE_CONFIG_CONTENT has higher precedence than the project config. This

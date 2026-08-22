@@ -18,8 +18,8 @@ from pogo_iphone_renamer.prompts import READ_ONLY_PROMPT, rename_prompt
 class GuiSettingsTests(unittest.TestCase):
     def test_defaults_use_current_mcp_and_model(self) -> None:
         settings = AppSettings()
-        self.assertEqual(DEFAULT_MCP_URL, "http://192.168.68.67:8090/mcp")
-        self.assertEqual(settings.health_url, "http://192.168.68.67:8090/health")
+        self.assertEqual(DEFAULT_MCP_URL, "http://127.0.0.1:8090/mcp")
+        self.assertEqual(settings.health_url, "http://127.0.0.1:8090/health")
         self.assertEqual(settings.model, "qwen3.8:27b")
         self.assertTrue(settings.unlimited)
 
