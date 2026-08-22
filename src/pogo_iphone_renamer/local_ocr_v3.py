@@ -16,7 +16,13 @@ from .species_db import traditional_chinese_species
 # otherwise a perfectly plain species name is falsely classified as a custom
 # nickname.  Keep the leading H mandatory so IV number tokens remain strong
 # annotation evidence.
-HP_LINE = re.compile(r"^\d+\s*/\s*\d+\s*H(?:P)?$", re.IGNORECASE)
+HP_LINE = re.compile(
+    r"^(?:"
+    r"\d+\s*/\s*\d+\s*H(?:P)?"
+    r"|[DPH]{1,2}\s*\d+\s*/\s*\d+"
+    r")$",
+    re.IGNORECASE,
+)
 NUMBER_TOKEN = re.compile(r"^\d{1,3}$")
 
 

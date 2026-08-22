@@ -8,6 +8,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
+from pogo_iphone_renamer import ipad_landscape_agent as base
 from pogo_iphone_renamer.ipad_landscape_agent_v14 import (
     _inventory_text_evidence,
     _pokedex_detail_text_evidence,
@@ -35,6 +36,21 @@ def _snapshot(color: tuple[int, int, int]) -> Snapshot:
 
 
 class ResilientLandscapeNavigationTests(unittest.TestCase):
+    def test_rotated_hp_ocr_still_proves_plain_detail(self) -> None:
+        snapshot = Snapshot(text="", image="current-detail")
+        lines = tuple(
+            OCRLine(text, 0.99)
+            for text in ("CP846", "瑪瑙水母", "dH66/66", "38.96kg", "0.88m")
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.measure_ipad14_6_appraisal",
+            side_effect=ValueError("plain detail has no appraisal bars"),
+        ), patch(
+            "pogo_iphone_renamer.local_ocr.ocr_mcp_screenshot",
+            return_value=lines,
+        ):
+            self.assertEqual(base.local_page_state(snapshot), "DETAIL")
+
     def test_storage_capacity_accepts_thousands_separators(self) -> None:
         self.assertTrue(storage_capacity_visible("9,987 / 10,150"))
         self.assertTrue(storage_capacity_visible("9987 / 10150"))

@@ -38,6 +38,7 @@ ANCHORS: dict[str, tuple[float, float, str, str]] = {
     "DETAIL_MENU": (0.8047, 0.7167, "寶可夢鑑定", "APPRAISAL"),
     "APPRAISAL_DIALOG": (0.5000, 0.9473, "鉴定对白", "APPRAISAL_BARS"),
     "APPRAISAL_CLOSE": (0.5000, 0.9473, "关闭鉴定", "DETAIL"),
+    "DETAIL_CLOSE": (0.5000, 0.9473, "关闭详情返回宝可梦盒", "INVENTORY"),
     "POKEDEX_CLOSE": (0.5000, 0.9014, "关闭图鉴条目", "PREVIOUS_PAGE"),
     "POKEDEX_GRID_CLOSE": (0.5000, 0.7380, "关闭图鉴列表", "MAIN_MENU"),
     "NAME_PENCIL": (0.6006, 0.5081, "名称铅笔", "RENAME_DIALOG"),
@@ -84,6 +85,25 @@ def _bright_fraction(snapshot: Snapshot) -> float:
     return sum(1 for red, green, blue in pixels if min(red, green, blue) >= 205) / len(pixels)
 
 
+def _detail_text_evidence(text: str) -> bool:
+    """Recognize a detail page despite rotated OCR mangling the HP prefix.
+
+    On the real landscape-right iPad, RapidOCR can read ``66/66 HP`` as
+    ``dH66/66``.  CP + weight + height are independent, layout-specific fields
+    that do not coexist on MAP or INVENTORY, so this conjunction remains a
+    stronger page proof than depending on the two Latin HP letters.
+    """
+
+    folded = text.casefold().replace(",", ".")
+    has_cp = bool(re.search(r"\bcp\s*\d+\b", folded))
+    has_weight = bool(re.search(r"\b\d+(?:\.\d+)?\s*kg\b", folded))
+    has_height = bool(re.search(r"\b\d+(?:\.\d+)?\s*m\b", folded))
+    has_hp_fraction = bool(
+        re.search(r"(?:[a-z]{0,2})?\d+\s*/\s*\d+(?:[a-z]{0,2})?", folded)
+    )
+    return has_cp and has_weight and has_height and has_hp_fraction
+
+
 def local_page_state(snapshot: Snapshot) -> str:
     if snapshot.image:
         try:
@@ -111,6 +131,8 @@ def local_page_state(snapshot: Snapshot) -> str:
             pass
     if "清除文本" in text and ("完成" in text or "取消" in text):
         return "RENAME_DIALOG"
+    if _detail_text_evidence(text):
+        return "DETAIL"
     if re.search(r"\d{3,}\s*/\s*\d{3,}", text) and "hp" not in text:
         return "INVENTORY"
     if "hp" in text and ("kg" in text or re.search(r"\d+(?:\.\d+)?m\b", text)):

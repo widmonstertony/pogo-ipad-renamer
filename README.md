@@ -43,17 +43,27 @@ python launcher_ipad_landscape_v9.py
 
 ## macOS 启动
 
-安装带 Tk 的 Python 3.11+（推荐 python.org 官方安装包），首次右键打开：
+支持 Intel 与 Apple Silicon Mac。安装带 Tk 的 Python 3.11+（推荐 python.org 官方
+安装包），首次右键打开：
 
 ```text
 启动-PokemonGO-整理助手-macOS.command
 ```
 
-启动器会在仓库内创建 `.venv`，安装 RapidOCR、ONNX Runtime 和 Pillow，然后打开
-同一套 GUI。后续可直接双击。若使用 Homebrew Python 且提示缺少 Tk，请安装与
-Python 版本匹配的 `python-tk`。
+启动器会先校验 Python 版本和 Tk，在仓库内创建 `.venv`，安装 RapidOCR、ONNX
+Runtime 和 Pillow，然后打开同一套 GUI。依赖与 `pyproject.toml` 没有变化时，后续
+双击不会再次访问网络。若使用 Homebrew Python 且提示缺少 Tk，请安装与 Python
+版本匹配的 `python-tk`；也可临时用环境变量 `POGO_PYTHON` 指定解释器。
+
+从 GitHub ZIP 下载后若双击没有执行权限，在终端运行一次：
+
+```bash
+chmod +x ./启动-PokemonGO-整理助手-macOS.command
+```
 
 macOS 与 iPad 必须能通过局域网互访；在 GUI 顶部填写 iOS MCP 的 `/mcp` 地址。
+批次期间使用系统自带 `caffeinate` 临时防止 Mac 与显示器睡眠，任务结束后自动释放；
+设备全局锁使用 macOS 原生 `flock`，不会与第二个窗口同时触控 iPad。
 
 ## 测试
 

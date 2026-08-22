@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ from .ipad_landscape_agent_v24 import (
     _navigate_with_read_only_measurement_retry,
 )
 from .ipad_landscape_agent_v25 import _navigate_with_complete_stale_recovery
-from .landscape_cv_v5 import measure_ipad14_6_appraisal_v5
+from .landscape_cv_v6 import measure_ipad14_6_appraisal_v6
 from .local_ocr_v3 import NameRegionResult, analyze_name_region
 from .native_agent import emit
 from .native_agent_v2 import ResilientStreamableHTTPClient
@@ -48,12 +49,95 @@ from .server import SafeProxy
 from .species_db import traditional_chinese_species
 
 
-base.measure_ipad14_6_appraisal = measure_ipad14_6_appraisal_v5
+base.measure_ipad14_6_appraisal = measure_ipad14_6_appraisal_v6
 
 
-_DIRECT_MEASUREMENT_CONFIDENCE = 0.94
-_CONSENSUS_MEASUREMENT_CONFIDENCE = 0.92
-_LOW_CONFIDENCE_READ_ONLY_RETRIES = 4
+_CONSENSUS_MEASUREMENT_CONFIDENCE = 0.80
+_MEASUREMENT_READ_ONLY_RETRIES = 12
+_DETAIL_IDENTITY_READ_ONLY_RETRIES = 12
+_FRESH_FRAME_HISTORY_LIMIT = 512
+
+
+def _snapshot_digest(snapshot: Snapshot) -> str:
+    if not snapshot.image:
+        raise PolicyViolation("截图缺失，无法验证帧新鲜度")
+    return hashlib.sha256(base64.b64decode(snapshot.image)).hexdigest()
+
+
+def _frame_history(proxy: SafeProxy) -> list[str]:
+    history = getattr(proxy, "_pogo_verified_frame_history", None)
+    if isinstance(history, list):
+        return history
+    history = []
+    try:
+        setattr(proxy, "_pogo_verified_frame_history", history)
+    except AttributeError:
+        pass
+    return history
+
+
+def _remember_fresh_frames(proxy: SafeProxy, digests: list[str]) -> None:
+    history = _frame_history(proxy)
+    for digest in digests:
+        if digest not in history:
+            history.append(digest)
+    if len(history) > _FRESH_FRAME_HISTORY_LIMIT:
+        del history[:-_FRESH_FRAME_HISTORY_LIMIT]
+
+
+def _detail_name_key(result: NameRegionResult) -> tuple[str, str]:
+    if result.is_default and result.species:
+        return "default", result.species
+    return "custom", ""
+
+
+def _confirm_fresh_detail_identity(
+    proxy: SafeProxy,
+    snapshot: Snapshot,
+) -> tuple[Snapshot, NameRegionResult] | None:
+    """Require three distinct, never-before-used detail frames.
+
+    ios-mcp can replay an old but visually valid screenshot after the real
+    device has already navigated.  Pixel hashes make those cached frames
+    ineligible, while the local name reader ties the later appraisal back to
+    the same default species seen before any appraisal controls are opened.
+    """
+
+    blocked = set(_frame_history(proxy))
+    samples: dict[tuple[str, str], list[tuple[Snapshot, NameRegionResult, str]]] = {}
+    candidates = [snapshot]
+    for attempt in range(_DETAIL_IDENTITY_READ_ONLY_RETRIES):
+        if attempt:
+            candidates.append(base._next_snapshot(proxy, 1.0))
+        candidate = candidates[-1]
+        try:
+            base._validate_expected("DETAIL", candidate)
+            digest = _snapshot_digest(candidate)
+        except PolicyViolation:
+            continue
+        if digest in blocked:
+            continue
+        try:
+            result = analyze_name_region(candidate.image, base.ORIENTATION)
+        except PolicyViolation:
+            continue
+        key = _detail_name_key(result)
+        bucket = samples.setdefault(key, [])
+        if digest in {item[2] for item in bucket}:
+            continue
+        bucket.append((candidate, result, digest))
+        if len(bucket) >= 3:
+            digests = [item[2] for item in bucket]
+            _remember_fresh_frames(proxy, digests)
+            emit(
+                "status",
+                message=(
+                    "详情身份已由三张不同且未复用的截图确认："
+                    f"{_display_name(result)}。"
+                ),
+            )
+            return candidate, result
+    return None
 
 
 def _ensure_game_foreground(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
@@ -168,29 +252,52 @@ def _wait_at_safe_pause_boundary(
 def _close_appraisal(proxy: SafeProxy) -> Snapshot:
     for attempt in range(2):
         base._tap(proxy, "APPRAISAL_CLOSE")
-        detail = base._next_snapshot(proxy, 1.5)
-        if v14.snapshot_is_black(detail):
-            detail = wait_for_capture_channel(
-                proxy, detail, allow_game_restart=False
+        observed_states: list[str] = []
+        last_validation_error: PolicyViolation | None = None
+        for observation in range(5):
+            # Closing the appraisal overlay has a variable animation time on
+            # the real iPad.  A single in-between frame can contain neither a
+            # classifiable DETAIL page nor complete appraisal tracks.  Keep
+            # observing without touching; only another proven page can
+            # authorize the next action.
+            candidate = base._next_snapshot(
+                proxy, 1.5 if observation == 0 else 0.8
             )
-        try:
-            base._validate_expected("DETAIL", detail)
-            return detail
-        except PolicyViolation as validation_error:
-            if attempt == 0 and detail.image:
+            if v14.snapshot_is_black(candidate):
+                candidate = wait_for_capture_channel(
+                    proxy, candidate, allow_game_restart=False
+                )
+            try:
+                base._validate_expected("DETAIL", candidate)
+                return candidate
+            except PolicyViolation as validation_error:
+                last_validation_error = validation_error
+
+            state = "unknown"
+            if candidate.image:
                 try:
-                    base.measure_ipad14_6_appraisal(detail.image, base.ORIENTATION)
-                except ValueError as measurement_error:
-                    # The close tap outcome is not proven.  Do not repeat a
-                    # coordinate tap on an unknown non-appraisal page, and do
-                    # not leak the low-level CV error as a fatal batch error.
-                    raise PolicyViolation(
-                        "关闭鉴定页后既未验证到详情页，也未确认鉴定条仍可见；"
-                        "未重复点击"
-                    ) from measurement_error
-                emit("status", message="鉴定页确认未关闭；刷新观察后重试一次关闭。")
-                continue
-            raise validation_error
+                    base.measure_ipad14_6_appraisal(
+                        candidate.image, base.ORIENTATION
+                    )
+                    state = "appraisal"
+                except ValueError:
+                    pass
+            observed_states.append(state)
+
+        # A repeated close tap is allowed only when the last two independent
+        # screenshots both prove that the appraisal tracks are still present.
+        # Transitional/unknown frames never authorize a second tap.
+        if attempt == 0 and observed_states[-2:] == ["appraisal", "appraisal"]:
+            emit(
+                "status",
+                message="连续两帧确认鉴定页仍未关闭；安全重试一次关闭。",
+            )
+            continue
+        if last_validation_error is not None:
+            raise PolicyViolation(
+                "关闭鉴定页后经五帧只读等待仍未验证到详情页；"
+                "页面状态不明确，未重复点击"
+            ) from last_validation_error
     raise PolicyViolation("无法安全关闭鉴定页")
 
 
@@ -198,6 +305,29 @@ def _display_name(result: NameRegionResult) -> str:
     if result.species:
         return result.species
     return next((token for token in result.evidence if token.strip()), "自定义昵称")
+
+
+def _ensure_plain_detail(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
+    """Navigate only as far as a plain detail page, never into appraisal."""
+
+    state = v14.robust_page_state(snapshot)
+    if state == "APPRAISAL_BARS":
+        return _close_appraisal(proxy)
+    if state == "DETAIL":
+        base._validate_expected("DETAIL", snapshot)
+        return snapshot
+    order = ["MAP", "MAIN_MENU", "INVENTORY"]
+    if state not in order:
+        raise PolicyViolation(f"批量详情入口不支持当前页面：{state}")
+    for current in order[order.index(state) :]:
+        snapshot = base._ensure_stage_geometry_for_state(
+            proxy, snapshot, current, state_reader=v14.robust_page_state
+        )
+        base._tap(proxy, current)
+        snapshot = base._next_snapshot(proxy)
+        expected = base.ANCHORS[current][3]
+        base._validate_expected(expected, snapshot)
+    return snapshot
 
 
 def _measurement_key(measurement) -> tuple[int, int, int]:
@@ -209,23 +339,34 @@ def _measurement_key(measurement) -> tuple[int, int, int]:
 
 
 def _confirm_low_confidence_measurement(proxy: SafeProxy, snapshot: Snapshot, measurement):
-    """Confirm a sub-94% integer result with read-only cross-frame consensus.
+    """Require three agreeing dual-decoder frames before any rename.
 
-    Dynamic divider geometry must already put every endpoint safely inside an
-    integer bucket.  A single anti-aliased frame still does not authorize a
-    rename below 94%, so recovery requires either two matching frames with one
-    direct result, or three matching frames at >=92%.  No tap is issued.
+    The v6 reader already requires divider geometry, physical track start,
+    endpoint decoding and 15-cell occupancy decoding to agree on each frame.
+    This final gate rejects a Pokémon if any independently valid frame reports
+    a different integer triple.  It performs screenshots only and never taps.
     """
 
-    samples: list[tuple[Snapshot, object]] = [(snapshot, measurement)]
+    samples: list[tuple[Snapshot, object, str]] = []
+    blocked = set(_frame_history(proxy))
+    try:
+        initial_digest = _snapshot_digest(snapshot)
+    except PolicyViolation:
+        initial_digest = ""
+    if (
+        float(measurement.confidence) >= _CONSENSUS_MEASUREMENT_CONFIDENCE
+        and initial_digest
+        and initial_digest not in blocked
+    ):
+        samples.append((snapshot, measurement, initial_digest))
     emit(
         "status",
         message=(
-            f"鉴定条初帧置信度 {measurement.confidence:.1%}；"
-            "仅追加只读截图，使用多帧一致性复核。"
+            f"鉴定条初帧双解码置信度 {measurement.confidence:.1%}；"
+            "正在追加只读截图，要求三帧 IV 完全一致。"
         ),
     )
-    for attempt in range(1, _LOW_CONFIDENCE_READ_ONLY_RETRIES + 1):
+    for attempt in range(1, _MEASUREMENT_READ_ONLY_RETRIES + 1):
         retry = base._next_snapshot(proxy, 1.25)
         if v14.snapshot_is_black(retry):
             retry = wait_for_capture_channel(
@@ -239,26 +380,34 @@ def _confirm_low_confidence_measurement(proxy: SafeProxy, snapshot: Snapshot, me
             )
         except ValueError:
             continue
-        samples.append((retry, fresh))
-        key = _measurement_key(fresh)
-        matching = [
-            item
-            for item in samples
-            if _measurement_key(item[1]) == key
-            and float(item[1].confidence) >= _CONSENSUS_MEASUREMENT_CONFIDENCE
-        ]
-        has_direct = any(
-            float(item[1].confidence) >= _DIRECT_MEASUREMENT_CONFIDENCE
-            for item in matching
-        )
-        if (has_direct and len(matching) >= 2) or len(matching) >= 3:
-            confidences = ", ".join(
-                f"{float(item[1].confidence):.1%}" for item in matching
-            )
+        if float(fresh.confidence) < _CONSENSUS_MEASUREMENT_CONFIDENCE:
+            continue
+        digest = _snapshot_digest(retry)
+        if digest in blocked or digest in {item[2] for item in samples}:
+            continue
+        fresh_key = _measurement_key(fresh)
+        existing_keys = {_measurement_key(item[1]) for item in samples}
+        if existing_keys and fresh_key not in existing_keys:
             emit(
                 "status",
                 message=(
-                    f"多帧 IV 一致确认 A/D/S={key[0]}/{key[1]}/{key[2]} "
+                    f"多帧 IV 出现冲突：{sorted(existing_keys)} 与 {fresh_key}；"
+                    "本只绝不改名。"
+                ),
+            )
+            return None
+        samples.append((retry, fresh, digest))
+        if len(samples) >= 3:
+            key = _measurement_key(fresh)
+            confidences = ", ".join(
+                f"{float(item[1].confidence):.1%}" for item in samples
+            )
+            _remember_fresh_frames(proxy, [item[2] for item in samples])
+            emit(
+                "status",
+                message=(
+                    f"三张未复用像素帧双解码 IV 一致确认 "
+                    f"A/D/S={key[0]}/{key[1]}/{key[2]} "
                     f"（{confidences}）；继续本只。"
                 ),
             )
@@ -273,6 +422,26 @@ def _process_one(
     mode: str,
     index: int,
 ) -> tuple[Snapshot, str]:
+    snapshot = _ensure_plain_detail(proxy, snapshot)
+    detail_identity = _confirm_fresh_detail_identity(proxy, snapshot)
+    if detail_identity is None:
+        emit(
+            "status",
+            message=(
+                f"第 {index} 只未取得三张新鲜详情身份帧；"
+                "可能是 MCP 回放旧截图，已保留原名并继续下一只。"
+            ),
+        )
+        return snapshot, "unreadable"
+    snapshot, detail_name = detail_identity
+    if not detail_name.is_default or not detail_name.species:
+        evidence = " / ".join(detail_name.evidence) or "非完整默认物种名"
+        emit(
+            "status",
+            message=f"第 {index} 只已有昵称，未打开鉴定或改名并继续：{evidence}",
+        )
+        return snapshot, "skipped"
+
     try:
         appraisal, measurement = _navigate_with_complete_stale_recovery(proxy, snapshot)
     except AppraisalMeasurementUnavailable as exc:
@@ -291,26 +460,23 @@ def _process_one(
             ),
         )
         return detail, "unreadable"
-    if measurement.confidence < _DIRECT_MEASUREMENT_CONFIDENCE:
-        confirmed = _confirm_low_confidence_measurement(
-            proxy, appraisal, measurement
+    confirmed = _confirm_low_confidence_measurement(proxy, appraisal, measurement)
+    if confirmed is not None:
+        appraisal, measurement = confirmed
+    else:
+        # No rename control has been opened and the appraisal overlay is
+        # still the last verified page, so this remains a recoverable
+        # per-Pokemon miss rather than a fatal batch error.
+        _save_unreadable_appraisal(appraisal, index)
+        detail = _close_appraisal(proxy)
+        emit(
+            "status",
+            message=(
+                f"第 {index} 只鉴定条未通过三帧双解码一致性验证，"
+                "已保留原名并继续下一只。"
+            ),
         )
-        if confirmed is not None:
-            appraisal, measurement = confirmed
-        else:
-            # No rename control has been opened and the appraisal overlay is
-            # still the last verified page, so this remains a recoverable
-            # per-Pokemon miss rather than a fatal batch error.
-            _save_unreadable_appraisal(appraisal, index)
-            detail = _close_appraisal(proxy)
-            emit(
-                "status",
-                message=(
-                    f"第 {index} 只鉴定条多帧仍无法一致确认，"
-                    "已保留原名并继续下一只。"
-                ),
-            )
-            return detail, "unreadable"
+        return detail, "unreadable"
     if not appraisal.image:
         raise PolicyViolation("鉴定截图缺失")
     emit(
@@ -322,25 +488,32 @@ def _process_one(
         endpoints=list(measurement.endpoints),
     )
     name = analyze_name_region(appraisal.image, base.ORIENTATION)
-    if not name.is_default or not name.species:
+    if (
+        not name.is_default
+        or not name.species
+        or name.species != detail_name.species
+    ):
         detail = _close_appraisal(proxy)
-        evidence = " / ".join(name.evidence) or "非完整默认物种名"
+        evidence = " / ".join(name.evidence) or "鉴定帧未确认默认物种名"
         emit(
             "status",
-            message=f"第 {index} 只已有昵称，保留并继续下一只：{evidence}",
+            message=(
+                f"第 {index} 只详情身份 {detail_name.species} 与鉴定帧不一致；"
+                f"疑似 MCP 旧缓存，绝不改名并继续：{evidence}"
+            ),
         )
-        return detail, "skipped"
+        return detail, "unreadable"
 
     nickname = generate_iv_nickname(
-        name.species,
+        detail_name.species,
         measurement.attack,
         measurement.defense,
         measurement.stamina,
     )
     emit(
         "pokemon",
-        species=name.species,
-        current_name=name.species,
+        species=detail_name.species,
+        current_name=detail_name.species,
         attack=measurement.attack,
         defense=measurement.defense,
         stamina=measurement.stamina,
@@ -358,7 +531,9 @@ def _process_one(
         # reject a successful close and terminate the whole batch before the
         # pencil is ever touched.
         detail_before_rename = _close_appraisal(proxy)
-        open_dynamic_rename_from_detail(proxy, detail_before_rename, name.species)
+        open_dynamic_rename_from_detail(
+            proxy, detail_before_rename, detail_name.species
+        )
     except RenamePencilLocalizationUnavailable as exc:
         # The typed exception is raised only after a verified DETAIL snapshot
         # and only before a pencil tap.  No dialog or keyboard can be pending,
@@ -375,8 +550,8 @@ def _process_one(
     try:
         _commit_after_dismissing_keyboard(
             proxy,
-            current_name=name.species,
-            species=name.species,
+            current_name=detail_name.species,
+            species=detail_name.species,
             nickname=nickname,
         )
     except RenameFieldVerificationUnavailable as exc:
@@ -438,7 +613,6 @@ def run(mode: str, settings: Settings) -> int:
             base._next_snapshot = device_aware_next_snapshot
             snapshot = wait_for_capture_channel(proxy, screen_snapshot(proxy))
             snapshot = _ensure_game_foreground(proxy, snapshot)
-            seen: set[DetailFingerprint] = set()
             counts = {"renamed": 0, "skipped": 0, "scanned": 0, "unreadable": 0}
             pause = _pause_file(settings)
             index = 1
@@ -461,10 +635,8 @@ def run(mode: str, settings: Settings) -> int:
                 emit("status", message=f"正在处理{progress_text}…")
                 detail, outcome = _process_one(proxy, snapshot, mode=mode, index=index)
                 counts[outcome] += 1
+                _remember_fresh_frames(proxy, [_snapshot_digest(detail)])
                 fingerprint = detail_fingerprint(detail)
-                if fingerprint in seen:
-                    raise PolicyViolation("检测到已处理过的详情身份；为避免循环已停止")
-                seen.add(fingerprint)
                 _emit_progress(
                     current=index,
                     limit=settings.batch_limit,
@@ -504,8 +676,6 @@ def run(mode: str, settings: Settings) -> int:
                     raise PolicyViolation(
                         f"{exc}；为避免误报完成，本轮安全停止"
                     ) from exc
-                if next_fingerprint in seen:
-                    raise PolicyViolation("下一只与已处理身份重复；批量任务已停止")
                 index += 1
 
             emit(

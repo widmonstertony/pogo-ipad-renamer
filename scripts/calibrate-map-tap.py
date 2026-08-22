@@ -24,7 +24,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--anchor", choices=("MAP", "MAIN_MENU", "INVENTORY"), default="MAP"
+        "--anchor",
+        choices=("MAP", "MAIN_MENU", "INVENTORY", "DETAIL_CLOSE"),
+        default="MAP",
     )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -34,10 +36,11 @@ def main() -> int:
         proxy = SafeProxy(settings, client)
         before = screen_snapshot(proxy)
         state_before = robust_page_state(before)
-        if state_before != args.anchor:
-            raise RuntimeError(f"expected {args.anchor}, got {state_before}")
+        expected_before = "DETAIL" if args.anchor == "DETAIL_CLOSE" else args.anchor
+        if state_before != expected_before:
+            raise RuntimeError(f"expected {expected_before}, got {state_before}")
         before = base._ensure_stage_geometry_for_state(
-            proxy, before, args.anchor, state_reader=robust_page_state
+            proxy, before, expected_before, state_reader=robust_page_state
         )
         geometry = base.current_stage_geometry(proxy)
         observation = proxy.observation

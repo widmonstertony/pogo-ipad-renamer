@@ -18,6 +18,17 @@ def scale_for_display(width: int, height: int, dpi: int) -> float:
     return round(max(dpi_scale, resolution_scale), 2)
 
 
+def preferred_ui_fonts(platform_name: str | None = None) -> tuple[str, str]:
+    """Return native-looking UI and log fonts for the host desktop."""
+
+    platform_name = sys.platform if platform_name is None else platform_name
+    if platform_name == "darwin":
+        return "SF Pro Text", "Menlo"
+    if platform_name == "win32":
+        return "Segoe UI", "Cascadia Mono"
+    return "TkDefaultFont", "TkFixedFont"
+
+
 def enable_per_monitor_dpi() -> None:
     if os.name != "nt":
         return
@@ -76,20 +87,23 @@ class HiDpiRenamerApp(RenamerApp):
         )
 
         style = self.ttk.Style(self.window)
-        style.configure("Title.TLabel", font=("Segoe UI", 24, "bold"))
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 11))
-        style.configure("CardTitle.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("CardText.TLabel", font=("Segoe UI", 11))
-        style.configure("Good.TLabel", font=("Segoe UI", 11, "bold"))
-        style.configure("Bad.TLabel", font=("Segoe UI", 11, "bold"))
-        style.configure("Idle.TLabel", font=("Segoe UI", 11, "bold"))
-        style.configure("Primary.TButton", font=("Segoe UI", 12, "bold"))
-        style.configure("Success.TButton", font=("Segoe UI", 12, "bold"))
-        style.configure("Danger.TButton", font=("Segoe UI", 11, "bold"))
-        style.configure("Secondary.TButton", font=("Segoe UI", 11))
+        ui_font, _log_font = preferred_ui_fonts()
+        style.configure("Title.TLabel", font=(ui_font, 24, "bold"))
+        style.configure("Subtitle.TLabel", font=(ui_font, 11))
+        style.configure("CardTitle.TLabel", font=(ui_font, 12, "bold"))
+        style.configure("CardText.TLabel", font=(ui_font, 11))
+        style.configure("Good.TLabel", font=(ui_font, 11, "bold"))
+        style.configure("Bad.TLabel", font=(ui_font, 11, "bold"))
+        style.configure("Idle.TLabel", font=(ui_font, 11, "bold"))
+        style.configure("Primary.TButton", font=(ui_font, 12, "bold"))
+        style.configure("Success.TButton", font=(ui_font, 12, "bold"))
+        style.configure("Danger.TButton", font=(ui_font, 11, "bold"))
+        style.configure("Secondary.TButton", font=(ui_font, 11))
 
     def _build_ui(self) -> None:
         super()._build_ui()
+        _ui_font, log_font = preferred_ui_fonts()
+        self.log.configure(font=(log_font, 10))
         self._append_log(
             f"4K 自动缩放已启用：{self.display_scale:.0%} "
             f"（{self.window.winfo_screenwidth()}×{self.window.winfo_screenheight()}）。"
@@ -115,4 +129,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

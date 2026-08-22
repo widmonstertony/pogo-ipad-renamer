@@ -35,6 +35,13 @@ class NameRegionClassificationTests(unittest.TestCase):
         self.assertTrue(result.is_default)
         self.assertEqual(result.species, "古月鳥")
 
+    def test_rotated_dh_hp_prefix_does_not_skip_plain_tentacool(self) -> None:
+        result = self.classify(
+            (OCRLine("瑪瑙水母", 1.0), OCRLine("dH66/66", 1.0))
+        )
+        self.assertTrue(result.is_default)
+        self.assertEqual(result.species, "瑪瑙水母")
+
     def test_circled_iv_rendered_as_numbers_is_custom(self) -> None:
         result = self.classify(
             (

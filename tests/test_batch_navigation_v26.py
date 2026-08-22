@@ -10,6 +10,7 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
     DetailFingerprint,
     NoNextPokemon,
     VerifiedEndOfStorage,
+    _observe_after_swipe,
     _swipe_next_once,
     fingerprints_differ,
     swipe_to_verified_next,
@@ -43,7 +44,7 @@ class DetailFingerprintTests(unittest.TestCase):
                 "toX": 301,
                 "toY": 512,
                 "_observation_token": "fresh-observation",
-                "_intent": "navigate horizontally to next Pokemon detail",
+                "_intent": "navigate left to next Pokemon detail",
                 "_expected_after": "DETAIL for a different Pokemon",
             },
         )
@@ -68,6 +69,9 @@ class DetailFingerprintTests(unittest.TestCase):
         )
         detail = Snapshot("CP500 60/60HP 6.0kg 0.4m", "detail")
         with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            return_value=(detail, fingerprint),
+        ), patch(
             "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
@@ -90,6 +94,9 @@ class DetailFingerprintTests(unittest.TestCase):
         first = Snapshot("same detail", "same")
         second = Snapshot("next detail", "next")
         with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            return_value=(first, before),
+        ), patch(
             "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
@@ -109,6 +116,9 @@ class DetailFingerprintTests(unittest.TestCase):
         )
         detail = Snapshot("detail", "image")
         with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            return_value=(detail, before),
+        ), patch(
             "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
@@ -118,6 +128,106 @@ class DetailFingerprintTests(unittest.TestCase):
                 swipe_to_verified_next(object(), detail, before=before)
 
         self.assertEqual(swipe.call_count, 1)
+
+    def test_unknown_sort_order_probes_opposite_direction_and_remembers_it(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        after = DetailFingerprint(
+            ("伊布",), "cp501", "61/61hp", "6.5kg", "0.5m"
+        )
+        same = Snapshot("same", "same")
+        changed = Snapshot("changed", "changed")
+        proxy = SimpleNamespace()
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            return_value=(same, before),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
+        ) as swipe, patch(
+            "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
+            side_effect=[
+                (same, before, False),
+                (same, before, False),
+                (changed, after, True),
+            ],
+        ):
+            returned, fingerprint = swipe_to_verified_next(
+                proxy, same, before=before
+            )
+
+        self.assertIs(returned, changed)
+        self.assertEqual(fingerprint, after)
+        self.assertEqual(
+            [call.kwargs["direction"] for call in swipe.call_args_list],
+            ["left", "left", "right"],
+        )
+        self.assertEqual(proxy._batch_swipe_direction, "right")
+
+    def test_one_transition_ocr_difference_does_not_prove_next_identity(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        false_change = DetailFingerprint(
+            ("皮卡丘",), "cpS00", "60/60hp", "6.0kg", "0.4m"
+        )
+        snapshots = [Snapshot("", f"frame-{index}") for index in range(8)]
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            side_effect=snapshots,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=[false_change] + [before] * 7,
+        ):
+            observed = _observe_after_swipe(object(), before)
+
+        self.assertIsNotNone(observed)
+        _snapshot, fingerprint, changed = observed
+        self.assertFalse(changed)
+        self.assertEqual(fingerprint, before)
+
+    def test_three_matching_changed_fingerprints_prove_next_identity(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        after = DetailFingerprint(
+            ("伊布",), "cp501", "61/61hp", "6.5kg", "0.5m"
+        )
+        snapshots = [Snapshot("", f"frame-{index}") for index in range(3)]
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            side_effect=snapshots,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=[after, after, after],
+        ):
+            observed = _observe_after_swipe(object(), before)
+
+        self.assertIsNotNone(observed)
+        snapshot, fingerprint, changed = observed
+        self.assertTrue(changed)
+        self.assertIs(snapshot, snapshots[-1])
+        self.assertEqual(fingerprint, after)
+
+    def test_cached_pre_swipe_pixels_cannot_authorize_another_swipe(self) -> None:
+        before = DetailFingerprint(
+            ("黏黏寶",), "cp846", "99/99hp", "39.96kg", "0.88m"
+        )
+        cached = Snapshot("", "cached-frame")
+        proxy = SimpleNamespace(_pogo_verified_frame_history=["old-hash"])
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            return_value=cached,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
+            return_value="old-hash",
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint"
+        ) as fingerprint:
+            observed = _observe_after_swipe(proxy, before)
+
+        self.assertIsNone(observed)
+        fingerprint.assert_not_called()
 
 
 if __name__ == "__main__":

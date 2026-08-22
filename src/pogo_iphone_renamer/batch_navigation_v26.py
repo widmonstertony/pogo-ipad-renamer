@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -29,10 +31,27 @@ class VerifiedEndOfStorage(NoNextPokemon):
 MAX_VERIFIED_SWIPE_ATTEMPTS = 4
 OBSERVATIONS_PER_SWIPE = 8
 OBSERVATION_DELAY_SECONDS = 0.8
+CHANGED_IDENTITY_CONFIRMATIONS = 3
+BASELINE_OBSERVATIONS = 5
+BASELINE_CONFIRMATIONS = 2
 
 
 def _normalized(value: str) -> str:
     return re.sub(r"\s+", "", value).casefold()
+
+
+def _snapshot_digest(snapshot: Snapshot) -> str:
+    if not snapshot.image:
+        return ""
+    try:
+        return hashlib.sha256(base64.b64decode(snapshot.image)).hexdigest()
+    except Exception:
+        return ""
+
+
+def _blocked_frame_hashes(proxy: SafeProxy) -> set[str]:
+    history = getattr(proxy, "_pogo_verified_frame_history", None)
+    return set(history) if isinstance(history, list) else set()
 
 
 @dataclass(frozen=True)
@@ -99,21 +118,24 @@ def fingerprints_differ(before: DetailFingerprint, after: DetailFingerprint) -> 
     return any(old != new for old, new in pairs)
 
 
-def _swipe_next_once(proxy: SafeProxy) -> None:
+def _swipe_next_once(proxy: SafeProxy, *, direction: str = "left") -> None:
     observation = proxy.observation
     if observation is None or observation.width is None or observation.height is None:
         raise PolicyViolation("MCP 未返回触控空间")
+    if direction not in {"left", "right"}:
+        raise ValueError(f"unsupported swipe direction: {direction}")
+    from_ratio, to_ratio = (0.78, 0.22) if direction == "left" else (0.22, 0.78)
     from_x, from_y = base.upright_ratio_to_touch(
         observation.width,
         observation.height,
-        0.78,
+        from_ratio,
         0.50,
         geometry=base.current_stage_geometry(proxy),
     )
     to_x, to_y = base.upright_ratio_to_touch(
         observation.width,
         observation.height,
-        0.22,
+        to_ratio,
         0.50,
         geometry=base.current_stage_geometry(proxy),
     )
@@ -125,10 +147,32 @@ def _swipe_next_once(proxy: SafeProxy) -> None:
             "toX": to_x,
             "toY": to_y,
             "_observation_token": observation.token,
-            "_intent": "navigate horizontally to next Pokemon detail",
+            "_intent": f"navigate {direction} to next Pokemon detail",
             "_expected_after": "DETAIL for a different Pokemon",
         },
     )
+
+
+def _stable_baseline(
+    proxy: SafeProxy,
+    detail: Snapshot,
+    initial: DetailFingerprint,
+) -> tuple[Snapshot, DetailFingerprint]:
+    """Read a modal pre-swipe identity so one OCR variant is not the baseline."""
+
+    counts: dict[DetailFingerprint, int] = {initial: 1}
+    snapshots: dict[DetailFingerprint, Snapshot] = {initial: detail}
+    for _ in range(BASELINE_OBSERVATIONS - 1):
+        candidate = base._next_snapshot(proxy, OBSERVATION_DELAY_SECONDS)
+        try:
+            fingerprint = detail_fingerprint(candidate)
+        except PolicyViolation:
+            continue
+        counts[fingerprint] = counts.get(fingerprint, 0) + 1
+        snapshots[fingerprint] = candidate
+        if counts[fingerprint] >= BASELINE_CONFIRMATIONS:
+            return snapshots[fingerprint], fingerprint
+    raise NoNextPokemon("翻页前无法取得两帧一致的详情身份")
 
 
 def _observe_after_swipe(
@@ -137,22 +181,37 @@ def _observe_after_swipe(
 ) -> tuple[Snapshot, DetailFingerprint, bool] | None:
     """Observe a bounded settling window after a swipe.
 
-    A changed identity wins immediately.  Otherwise the most recent strongly
-    verified copy of the previous detail is returned, allowing a swallowed
-    swipe to be retried from a known-safe page.  Frames that are transitioning,
-    temporarily unclassified, or have incomplete OCR are observation failures,
-    not evidence that navigation is impossible.
+    A changed identity wins only after the same complete fingerprint appears
+    in three independent screenshots.  A single transition-frame OCR error
+    must never turn the current Pokemon into a false "next" Pokemon.  Otherwise
+    the most recent strongly verified copy of the previous detail is returned,
+    allowing a swallowed swipe to be retried from a known-safe page.  Frames
+    that are transitioning, temporarily unclassified, or have incomplete OCR
+    are observation failures, not evidence that navigation is impossible.
     """
 
     same: tuple[Snapshot, DetailFingerprint, bool] | None = None
+    blocked = _blocked_frame_hashes(proxy)
+    changed_counts: dict[DetailFingerprint, int] = {}
+    changed_snapshots: dict[DetailFingerprint, Snapshot] = {}
     for _ in range(OBSERVATIONS_PER_SWIPE):
         snapshot = base._next_snapshot(proxy, OBSERVATION_DELAY_SECONDS)
+        digest = _snapshot_digest(snapshot)
+        if digest and digest in blocked:
+            # This exact pixel frame belonged to the Pokemon before the swipe.
+            # It is proof of MCP cache replay, not proof that the gesture was
+            # swallowed, so it must never authorize another swipe.
+            continue
         try:
             current = detail_fingerprint(snapshot)
         except PolicyViolation:
             continue
         if fingerprints_differ(previous, current):
-            return snapshot, current, True
+            changed_counts[current] = changed_counts.get(current, 0) + 1
+            changed_snapshots[current] = snapshot
+            if changed_counts[current] >= CHANGED_IDENTITY_CONFIRMATIONS:
+                return changed_snapshots[current], current, True
+            continue
         same = snapshot, current, False
     return same
 
@@ -164,9 +223,19 @@ def swipe_to_verified_next(
     before: DetailFingerprint | None = None,
 ) -> tuple[Snapshot, DetailFingerprint]:
     previous = before or detail_fingerprint(detail)
+    detail, previous = _stable_baseline(proxy, detail, previous)
     unchanged_confirmations = 0
-    for _attempt in range(MAX_VERIFIED_SWIPE_ATTEMPTS):
-        _swipe_next_once(proxy)
+    established_direction = getattr(proxy, "_batch_swipe_direction", None)
+    if established_direction in {"left", "right"}:
+        directions = [established_direction] * MAX_VERIFIED_SWIPE_ATTEMPTS
+    else:
+        # Storage sort order can place the first visible card at either end.
+        # Probe both directions only until the direction is established.  Once
+        # established, never reverse at the far end and accidentally walk back
+        # through already processed Pokemon.
+        directions = ["left", "left", "right", "right"]
+    for direction in directions:
+        _swipe_next_once(proxy, direction=direction)
         observed = _observe_after_swipe(proxy, previous)
         if observed is None:
             raise NoNextPokemon(
@@ -174,6 +243,10 @@ def swipe_to_verified_next(
             )
         snapshot, current, changed = observed
         if changed:
+            try:
+                setattr(proxy, "_batch_swipe_direction", direction)
+            except AttributeError:
+                pass
             return snapshot, current
         unchanged_confirmations += 1
         detail = snapshot
