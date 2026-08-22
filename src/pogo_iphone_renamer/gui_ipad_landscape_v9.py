@@ -68,6 +68,8 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self._append_log("默认不限数量；持续到盒子末尾、手动停止或安全条件不再满足。")
         self._append_log("安全暂停会先完成当前一只并回到详情页；继续时先复核同一只。")
         self._append_log("鉴定对白稳定且未显示 IV 条时只推进一次；绝不连续猜点。")
+        self._append_log("IV 每格宽度由画面中的 5/10 分段白线动态反算；不再使用固定左边界。")
+        self._append_log("低于 94% 会追加只读复核；多帧达不到严格一致就保留原名。")
         self._append_log("名称铅笔采用多尺度 OCR；缺框时使用 iPad14,6 真机字体标定后备。")
         self._append_log("昵称同时遵守 12 字符与 24 UTF-8 字节限制；长物种名会保留可提交的最长前缀。")
         self._append_log("单只鉴定条持续不可读时保留原名，安全返回详情并继续下一只。")

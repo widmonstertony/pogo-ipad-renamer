@@ -235,9 +235,9 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         first_snapshot = Snapshot("", "first")
         second_snapshot = Snapshot("", "second")
         third_snapshot = Snapshot("", "third")
-        first = IVMeasurement(12, 4, 3, 0.881, (1, 2, 3), (4, 5, 6))
-        second = IVMeasurement(12, 4, 3, 0.864, (1, 2, 3), (4, 5, 6))
-        third = IVMeasurement(12, 4, 3, 0.887, (1, 2, 3), (4, 5, 6))
+        first = IVMeasurement(12, 4, 3, 0.925, (1, 2, 3), (4, 5, 6))
+        second = IVMeasurement(12, 4, 3, 0.934, (1, 2, 3), (4, 5, 6))
+        third = IVMeasurement(12, 4, 3, 0.929, (1, 2, 3), (4, 5, 6))
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
             side_effect=[second_snapshot, third_snapshot],

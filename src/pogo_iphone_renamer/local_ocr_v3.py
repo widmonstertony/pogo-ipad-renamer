@@ -11,7 +11,12 @@ from .policy import PolicyViolation
 from .species_db import traditional_chinese_species
 
 
-HP_LINE = re.compile(r"^\d+\s*/\s*\d+\s*HP$", re.IGNORECASE)
+# The right edge of the narrow name crop can clip the final ``P`` from HP.
+# Treat ``108/108H`` as the same read-only detail stat as ``108/108HP``;
+# otherwise a perfectly plain species name is falsely classified as a custom
+# nickname.  Keep the leading H mandatory so IV number tokens remain strong
+# annotation evidence.
+HP_LINE = re.compile(r"^\d+\s*/\s*\d+\s*H(?:P)?$", re.IGNORECASE)
 NUMBER_TOKEN = re.compile(r"^\d{1,3}$")
 
 

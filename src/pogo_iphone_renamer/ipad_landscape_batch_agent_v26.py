@@ -51,8 +51,8 @@ from .species_db import traditional_chinese_species
 base.measure_ipad14_6_appraisal = measure_ipad14_6_appraisal_v5
 
 
-_DIRECT_MEASUREMENT_CONFIDENCE = 0.90
-_CONSENSUS_MEASUREMENT_CONFIDENCE = 0.80
+_DIRECT_MEASUREMENT_CONFIDENCE = 0.94
+_CONSENSUS_MEASUREMENT_CONFIDENCE = 0.92
 _LOW_CONFIDENCE_READ_ONLY_RETRIES = 4
 
 
@@ -209,13 +209,12 @@ def _measurement_key(measurement) -> tuple[int, int, int]:
 
 
 def _confirm_low_confidence_measurement(proxy: SafeProxy, snapshot: Snapshot, measurement):
-    """Confirm a sub-90% integer result with read-only cross-frame consensus.
+    """Confirm a sub-94% integer result with read-only cross-frame consensus.
 
-    The CV confidence maps endpoint distance from the nearest integer.  A
-    value at or above 80% remains at least 0.1 bar units inside the unique
-    rounding boundary, but a single anti-aliased frame should not authorize a
-    rename.  We therefore require either two matching frames with one direct
-    (>=90%) result, or three matching frames at >=80%.  No tap is issued.
+    Dynamic divider geometry must already put every endpoint safely inside an
+    integer bucket.  A single anti-aliased frame still does not authorize a
+    rename below 94%, so recovery requires either two matching frames with one
+    direct result, or three matching frames at >=92%.  No tap is issued.
     """
 
     samples: list[tuple[Snapshot, object]] = [(snapshot, measurement)]

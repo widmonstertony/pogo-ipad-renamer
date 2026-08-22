@@ -10,6 +10,7 @@ from pogo_iphone_renamer.landscape_cv_v5 import (
     _is_any_iv_fill,
     _row_consensus_endpoint,
     measure_ipad14_6_appraisal_v5,
+    measure_upright_appraisal_v5,
 )
 
 
@@ -71,11 +72,93 @@ class LandscapeCVV5Tests(unittest.TestCase):
         for y, endpoint in zip(range(center_y - 3, center_y + 4), endpoints):
             draw.line((x_start, y, endpoint, y), fill=(210, 130, 133))
         value, endpoint, confidence = _row_consensus_endpoint(
-            image, center_y, _is_any_iv_fill
+            image,
+            center_y,
+            _is_any_iv_fill,
+            geometry=(89.0, 348.0),
         )
         self.assertEqual(value, 14)
         self.assertEqual(endpoint, 330)
         self.assertGreaterEqual(confidence, 0.80)
+
+    def test_stage_manager_crop_does_not_add_one_to_each_iv(self) -> None:
+        image = Image.new("RGB", (1024, 1366), "white")
+        draw = ImageDraw.Draw(image)
+        start = 105
+        full_endpoint = 366
+        span = full_endpoint - start + 1
+        rows = (1046, 1113, 1182)
+        values = (2, 13, 11)
+        for row, value in zip(rows, values):
+            draw.rounded_rectangle(
+                (start, row - 5, full_endpoint, row + 5),
+                radius=5,
+                fill=(228, 228, 228),
+            )
+            endpoint = start - 1 + round(span * value / 15)
+            draw.rounded_rectangle(
+                (start, row - 5, endpoint, row + 5),
+                radius=5,
+                fill=(230, 169, 89),
+            )
+            for fraction in (1 / 3, 2 / 3):
+                tick = round(start + span * fraction)
+                draw.rectangle(
+                    (tick - 2, row - 7, tick + 2, row + 7),
+                    fill="white",
+                )
+            # Reproduce the label and trainer-colour distractors visible in
+            # the real Stage Manager frame.  Neither belongs to the IV track.
+            draw.rectangle((70, row - 2, 102, row + 2), fill=(230, 169, 89))
+            draw.rectangle((405, row - 2, 500, row + 2), fill=(230, 169, 89))
+
+        result = measure_upright_appraisal_v5(image)
+        self.assertEqual(
+            (result.attack, result.defense, result.stamina),
+            values,
+        )
+        self.assertNotEqual(
+            (result.attack, result.defense, result.stamina),
+            (3, 14, 12),
+        )
+        self.assertGreaterEqual(result.confidence, 0.90)
+
+    def test_phone_reference_geometry_reads_15_14_12_not_15_15_13(self) -> None:
+        image = Image.new("RGB", (589, 1280), "white")
+        draw = ImageDraw.Draw(image)
+        start = 70
+        full_endpoint = 272
+        span = full_endpoint - start + 1
+        rows = (983, 1039, 1093)
+        values = (15, 14, 12)
+        for row, value in zip(rows, values):
+            draw.rounded_rectangle(
+                (start, row - 4, full_endpoint, row + 4),
+                radius=4,
+                fill=(228, 228, 228),
+            )
+            endpoint = start - 1 + round(span * value / 15)
+            draw.rounded_rectangle(
+                (start, row - 4, endpoint, row + 4),
+                radius=4,
+                fill=(210, 130, 133) if value == 15 else (230, 169, 89),
+            )
+            for fraction in (1 / 3, 2 / 3):
+                tick = round(start + span * fraction)
+                draw.rectangle(
+                    (tick - 1, row - 6, tick + 1, row + 6),
+                    fill="white",
+                )
+
+        result = measure_upright_appraisal_v5(image)
+        self.assertEqual(
+            (result.attack, result.defense, result.stamina),
+            values,
+        )
+        self.assertNotEqual(
+            (result.attack, result.defense, result.stamina),
+            (15, 15, 13),
+        )
 
 
 if __name__ == "__main__":

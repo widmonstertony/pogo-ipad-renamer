@@ -28,6 +28,13 @@ class NameRegionClassificationTests(unittest.TestCase):
         self.assertTrue(result.is_default)
         self.assertEqual(result.species, "輕飄飄")
 
+    def test_clipped_hp_suffix_does_not_skip_plain_cramorant(self) -> None:
+        result = self.classify(
+            (OCRLine("古月鳥", 0.99), OCRLine("108/108H", 0.96))
+        )
+        self.assertTrue(result.is_default)
+        self.assertEqual(result.species, "古月鳥")
+
     def test_circled_iv_rendered_as_numbers_is_custom(self) -> None:
         result = self.classify(
             (

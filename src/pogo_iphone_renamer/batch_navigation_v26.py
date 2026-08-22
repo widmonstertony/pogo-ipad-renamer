@@ -110,6 +110,25 @@ def _swipe_next_once(proxy: SafeProxy) -> None:
         0.50,
         geometry=base.current_stage_geometry(proxy),
     )
+    to_x, to_y = base.upright_ratio_to_touch(
+        observation.width,
+        observation.height,
+        0.22,
+        0.50,
+        geometry=base.current_stage_geometry(proxy),
+    )
+    proxy.call_tool(
+        "swipe_screen",
+        {
+            "fromX": from_x,
+            "fromY": from_y,
+            "toX": to_x,
+            "toY": to_y,
+            "_observation_token": observation.token,
+            "_intent": "navigate horizontally to next Pokemon detail",
+            "_expected_after": "DETAIL for a different Pokemon",
+        },
+    )
 
 
 def _observe_after_swipe(
@@ -136,25 +155,6 @@ def _observe_after_swipe(
             return snapshot, current, True
         same = snapshot, current, False
     return same
-    to_x, to_y = base.upright_ratio_to_touch(
-        observation.width,
-        observation.height,
-        0.22,
-        0.50,
-        geometry=base.current_stage_geometry(proxy),
-    )
-    proxy.call_tool(
-        "swipe_screen",
-        {
-            "fromX": from_x,
-            "fromY": from_y,
-            "toX": to_x,
-            "toY": to_y,
-            "_observation_token": observation.token,
-            "_intent": "navigate horizontally to next Pokemon detail",
-            "_expected_after": "DETAIL for a different Pokemon",
-        },
-    )
 
 
 def swipe_to_verified_next(

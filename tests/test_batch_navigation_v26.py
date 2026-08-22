@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
@@ -8,12 +10,44 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
     DetailFingerprint,
     NoNextPokemon,
     VerifiedEndOfStorage,
+    _swipe_next_once,
     fingerprints_differ,
     swipe_to_verified_next,
 )
 
 
 class DetailFingerprintTests(unittest.TestCase):
+    def test_swipe_helper_always_issues_the_write_call(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(
+                width=1366,
+                height=1024,
+                token="fresh-observation",
+            ),
+            call_tool=Mock(),
+        )
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base.current_stage_geometry",
+            return_value="geometry",
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base.upright_ratio_to_touch",
+            side_effect=[(1065, 512), (301, 512)],
+        ):
+            _swipe_next_once(proxy)
+
+        proxy.call_tool.assert_called_once_with(
+            "swipe_screen",
+            {
+                "fromX": 1065,
+                "fromY": 512,
+                "toX": 301,
+                "toY": 512,
+                "_observation_token": "fresh-observation",
+                "_intent": "navigate horizontally to next Pokemon detail",
+                "_expected_after": "DETAIL for a different Pokemon",
+            },
+        )
+
     def test_custom_name_change_proves_next_identity(self) -> None:
         before = DetailFingerprint(("鯉魚王", "3", "7"), "cp111", "54/54hp", "12.73kg", "1.07m")
         after = DetailFingerprint(("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m")

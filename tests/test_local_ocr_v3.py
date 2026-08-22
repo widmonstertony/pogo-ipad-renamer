@@ -13,6 +13,7 @@ class NameAnnotationEvidenceTests(unittest.TestCase):
 
     def test_normal_hp_line_is_not_annotation_evidence(self) -> None:
         self.assertTrue(HP_LINE.fullmatch("95 / 95 HP"))
+        self.assertTrue(HP_LINE.fullmatch("108/108H"))
         self.assertFalse(NUMBER_TOKEN.fullmatch("95 / 95 HP"))
 
 
