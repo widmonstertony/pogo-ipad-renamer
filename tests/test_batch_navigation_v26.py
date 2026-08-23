@@ -17,6 +17,7 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
     detail_fingerprint,
     fingerprints_differ,
     swipe_to_verified_next,
+    wait_for_stable_detail_fingerprint,
 )
 
 
@@ -215,6 +216,35 @@ class DetailFingerprintTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(samples, ())
         self.assertEqual(next_snapshot.call_count, 2)
+        emit.assert_called_once()
+
+    def test_persistent_detail_fingerprint_wait_recovers_after_ocr_gap(self) -> None:
+        fingerprint = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        incomplete = Snapshot("name only", "incomplete")
+        recovered = Snapshot("complete detail", "recovered")
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=[
+                PolicyViolation("详情页稳定身份字段不足；不会自动翻页"),
+                fingerprint,
+            ],
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            return_value=recovered,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base.emit"
+        ) as emit:
+            snapshot, returned = wait_for_stable_detail_fingerprint(
+                object(), incomplete
+            )
+
+        self.assertIs(snapshot, recovered)
+        self.assertEqual(returned, fingerprint)
+        next_snapshot.assert_called_once_with(unittest.mock.ANY, 3.0)
         emit.assert_called_once()
 
     def test_unknown_sort_order_probes_opposite_direction_and_remembers_it(self) -> None:

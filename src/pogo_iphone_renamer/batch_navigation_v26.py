@@ -161,6 +161,43 @@ def fingerprints_differ(before: DetailFingerprint, after: DetailFingerprint) -> 
     return any(old != new for old, new in pairs)
 
 
+def wait_for_stable_detail_fingerprint(
+    proxy: SafeProxy, snapshot: Snapshot
+) -> tuple[Snapshot, DetailFingerprint]:
+    """Read only until a known detail regains enough fields for navigation.
+
+    This is deliberately narrower than page recovery: it applies only after
+    the batch has already proven a DETAIL page and a later frame temporarily
+    loses its CP/HP/size text.  In persistent direct-detail mode we keep that
+    same page untouched and wait; an overlay or any other unsafe page still
+    raises immediately.
+    """
+
+    try:
+        return snapshot, detail_fingerprint(snapshot)
+    except PolicyViolation as initial_error:
+        if (
+            not _persist_post_swipe_wait_enabled()
+            or "详情页稳定身份字段不足" not in str(initial_error)
+        ):
+            raise
+    base.emit(
+        "status",
+        message=(
+            "已验证的详情页身份字段暂时不完整；后台保持运行并只读等待恢复，"
+            "不会滑动、结束任务或重新打开游戏。"
+        ),
+    )
+    while True:
+        candidate = base._next_snapshot(proxy, 3.0)
+        try:
+            return candidate, detail_fingerprint(candidate)
+        except PolicyViolation as error:
+            if "详情页稳定身份字段不足" in str(error):
+                continue
+            raise
+
+
 def _swipe_next_once(proxy: SafeProxy, *, direction: str = "left") -> None:
     observation = proxy.observation
     if observation is None or observation.width is None or observation.height is None:

@@ -18,6 +18,7 @@ from .batch_navigation_v26 import (
     detail_fingerprint,
     fingerprints_differ,
     swipe_to_verified_next,
+    wait_for_stable_detail_fingerprint,
 )
 from .batch_pause import BatchPauseFile
 from .config import BATCH_LIMIT_UNLIMITED, Settings
@@ -1018,8 +1019,10 @@ def run(mode: str, settings: Settings) -> int:
                         current_detail_only=current_detail_only,
                         identity_seed_samples=seed_samples,
                     )
+                    detail, fingerprint = wait_for_stable_detail_fingerprint(
+                        proxy, detail
+                    )
                     _remember_fresh_frames(proxy, [_snapshot_digest(detail)])
-                    fingerprint = detail_fingerprint(detail)
                 except (PolicyViolation, ValueError) as exc:
                     if (
                         not current_detail_only
