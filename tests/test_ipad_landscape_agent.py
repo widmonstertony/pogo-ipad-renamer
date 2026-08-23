@@ -75,6 +75,32 @@ class IPadLandscapeAgentTests(unittest.TestCase):
             ],
         )
 
+    def test_missing_appraisal_capture_is_a_retryable_read_error(self) -> None:
+        detail = Snapshot(text="CP713 95/95HP 31.22kg 1.26m", image="detail")
+        missing_capture = Snapshot(text="", image=None)
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.local_page_state",
+            return_value="DETAIL",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent._ensure_stage_geometry_for_state",
+            side_effect=lambda _proxy, snapshot, _state: snapshot,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent._tap"
+        ) as tap, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent._next_snapshot",
+            side_effect=[detail, missing_capture],
+        ):
+            with self.assertRaisesRegex(ValueError, "鉴定页截图缺失"):
+                navigate_to_appraisal(object(), detail)
+
+        self.assertEqual(
+            tap.call_args_list,
+            [
+                call(unittest.mock.ANY, "DETAIL"),
+                call(unittest.mock.ANY, "DETAIL_MENU"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

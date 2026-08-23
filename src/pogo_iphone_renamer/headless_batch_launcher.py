@@ -44,6 +44,9 @@ def background_environment(root: Path, settings: AppSettings) -> dict[str, str]:
         # entry path or relaunch the game.
         "POGO_START_FROM_CURRENT_DETAIL": "true",
         "POGO_ALLOW_GAME_RESTART": "false",
+        # A dropped MCP screenshot stream is safe to wait out.  The detached
+        # direct-detail worker must not convert it into a task failure.
+        "POGO_PERSIST_CAPTURE_WAIT": "true",
     }
 
 

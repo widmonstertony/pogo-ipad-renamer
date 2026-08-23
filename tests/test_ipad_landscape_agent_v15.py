@@ -87,6 +87,37 @@ class CaptureStateTests(unittest.TestCase):
         refresh.assert_not_called()
         restart.assert_not_called()
 
+    def test_persistent_headless_capture_wait_recovers_without_any_write(self) -> None:
+        black = SimpleNamespace(image="black")
+        recovered = SimpleNamespace(image="recovered")
+        proxy = object()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.wait_for_unlocked_snapshot",
+            return_value=black,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.v14.snapshot_is_black",
+            side_effect=[True, False],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.time.monotonic",
+            side_effect=[0.0, 12.1],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15._persist_capture_wait_enabled",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.base._next_snapshot",
+            return_value=recovered,
+        ) as read, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.refresh_game_foreground_capture"
+        ) as refresh, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.restart_game_for_capture"
+        ) as restart, patch("pogo_iphone_renamer.ipad_landscape_agent_v15.emit"):
+            returned = wait_for_capture_channel(proxy, black, allow_game_restart=False)
+
+        self.assertIs(returned, recovered)
+        read.assert_called_once_with(proxy, 5.0)
+        refresh.assert_not_called()
+        restart.assert_not_called()
+
     def test_default_manual_unlock_wait_has_no_time_limit(self) -> None:
         proxy = object()
         with patch(

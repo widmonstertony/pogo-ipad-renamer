@@ -344,7 +344,12 @@ def navigate_to_appraisal(proxy: SafeProxy, snapshot: Snapshot) -> tuple[Snapsho
         _validate_expected(expected, snapshot)
 
     if not snapshot.image:
-        raise PolicyViolation("鉴定页截图缺失")
+        # The MCP can occasionally return an empty capture immediately after
+        # the Appraise transition.  This is a read-channel condition, not
+        # evidence that navigation failed: callers with the v24 adapter catch
+        # ValueError and perform bounded screenshot-only retries while leaving
+        # the appraisal overlay untouched.
+        raise ValueError("鉴定页截图缺失")
     # Selecting Appraise already opens the IV bars in the current game UI.  A
     # failed measurement here is normally just an animation frame.  The old
     # fallback tapped APPRAISAL_DIALOG, whose calibrated point is also the

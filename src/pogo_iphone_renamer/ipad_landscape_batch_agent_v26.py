@@ -267,6 +267,23 @@ def _current_detail_only(snapshot: Snapshot) -> bool:
     return True
 
 
+def _restore_direct_detail_after_interrupted_appraisal(
+    proxy: SafeProxy, snapshot: Snapshot
+) -> Snapshot:
+    """Close only a proven appraisal overlay before a direct-detail resume."""
+
+    if base.local_page_state(snapshot) != "APPRAISAL_BARS":
+        return snapshot
+    emit(
+        "status",
+        message=(
+            "检测到上次截图中断时遗留的鉴定层；只关闭鉴定层并回到同一只详情页，"
+            "不会进入精灵球、宝可梦盒或重启游戏。"
+        ),
+    )
+    return _close_appraisal(proxy)
+
+
 def _game_restart_allowed() -> bool:
     """Keep historical recovery opt-in; a normal navigation miss never relaunches."""
 
@@ -936,6 +953,15 @@ def run(mode: str, settings: Settings) -> int:
             snapshot = wait_for_capture_channel(
                 proxy, screen_snapshot(proxy), allow_game_restart=False
             )
+            if os.getenv("POGO_START_FROM_CURRENT_DETAIL", "").strip().casefold() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                snapshot = _restore_direct_detail_after_interrupted_appraisal(
+                    proxy, snapshot
+                )
             current_detail_only = _current_detail_only(snapshot)
             if current_detail_only:
                 emit(

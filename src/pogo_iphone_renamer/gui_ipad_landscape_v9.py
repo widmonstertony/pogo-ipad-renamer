@@ -273,6 +273,7 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 "POGO_PAUSE_FILE": str(self.pause_control.path),
                 "POGO_BACKGROUND_LOG": str(self._background_log_path()),
                 "POGO_BATCH_STATE": str(self._batch_state_path()),
+                "POGO_PERSIST_CAPTURE_WAIT": "true",
                 }
             )
             background_log = self._background_log_path()

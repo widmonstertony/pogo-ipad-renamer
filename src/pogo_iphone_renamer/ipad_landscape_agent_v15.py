@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from typing import Any
 
@@ -14,6 +15,17 @@ from .server import SafeProxy
 
 
 _MANUAL_UNLOCK_TIMEOUT: float | None = None
+
+
+def _persist_capture_wait_enabled() -> bool:
+    """Keep a headless direct-detail task alive through a lost frame stream."""
+
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def device_screen_state(proxy: SafeProxy) -> tuple[bool, bool]:
@@ -176,6 +188,26 @@ def wait_for_capture_channel(
             deadline = time.monotonic() + 12.0
 
     if not allow_game_restart:
+        if _persist_capture_wait_enabled():
+            emit(
+                "status",
+                message=(
+                    "截图通道连续 12 秒未恢复；后台任务保持运行并只读等待，"
+                    "不会返回主屏幕、重新打开或重启游戏。"
+                ),
+            )
+            while True:
+                snapshot = base._next_snapshot(proxy, 5.0)
+                if not v14.snapshot_is_black(snapshot):
+                    emit("status", message="MCP 截图通道已恢复，开始识别当前游戏页面。")
+                    return snapshot
+                locked, screen_on = device_screen_state(proxy)
+                if locked or not screen_on:
+                    wait_for_manual_unlock(proxy)
+                    snapshot = base._next_snapshot(proxy, 1.0)
+                    if not v14.snapshot_is_black(snapshot):
+                        emit("status", message="解锁后截图已恢复，继续识别当前游戏页面。")
+                        return snapshot
         raise PolicyViolation(
             "当前宝可梦处理中截图连续 12 秒为纯黑；"
             "为保留当前详情页，未返回主屏幕、未重新打开或重启游戏，任务安全停止"

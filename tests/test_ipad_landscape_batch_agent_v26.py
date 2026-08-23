@@ -28,6 +28,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _ensure_game_foreground,
     _ensure_plain_detail,
     _current_detail_only,
+    _restore_direct_detail_after_interrupted_appraisal,
     _is_recoverable_navigation_failure,
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
@@ -145,6 +146,27 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         ):
             with self.assertRaises(PolicyViolation):
                 _current_detail_only(overview)
+
+    def test_direct_resume_closes_only_a_proven_appraisal_overlay(self) -> None:
+        appraisal = Snapshot("", "appraisal")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = object()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+            return_value="APPRAISAL_BARS",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
+            return_value=detail,
+        ) as close, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ) as emit:
+            returned = _restore_direct_detail_after_interrupted_appraisal(
+                proxy, appraisal
+            )
+
+        self.assertIs(returned, detail)
+        close.assert_called_once_with(proxy)
+        self.assertIn("遗留的鉴定层", emit.call_args.kwargs["message"])
 
     def test_detail_capture_wait_never_permits_game_restart(self) -> None:
         proxy = object()
