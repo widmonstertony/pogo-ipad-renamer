@@ -252,6 +252,24 @@ def _stable_baseline(
         snapshots[fingerprint] = candidate
         if counts[fingerprint] >= BASELINE_CONFIRMATIONS:
             return snapshots[fingerprint], fingerprint
+    if _persist_post_swipe_wait_enabled():
+        base.emit(
+            "status",
+            message=(
+                "翻页前详情身份帧暂未凑齐两帧一致；后台保持运行并只读等待，"
+                "不会滑动、结束任务或重新打开游戏。"
+            ),
+        )
+        while True:
+            candidate = base._next_snapshot(proxy, 3.0)
+            try:
+                fingerprint = detail_fingerprint(candidate)
+            except PolicyViolation:
+                continue
+            counts[fingerprint] = counts.get(fingerprint, 0) + 1
+            snapshots[fingerprint] = candidate
+            if counts[fingerprint] >= BASELINE_CONFIRMATIONS:
+                return snapshots[fingerprint], fingerprint
     raise NoNextPokemon("翻页前无法取得两帧一致的详情身份")
 
 

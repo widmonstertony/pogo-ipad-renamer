@@ -12,6 +12,7 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
     NoNextPokemon,
     VerifiedEndOfStorage,
     _observe_after_swipe,
+    _stable_baseline,
     _swipe_next_once,
     _wait_for_post_swipe_identity,
     detail_fingerprint,
@@ -245,6 +246,34 @@ class DetailFingerprintTests(unittest.TestCase):
         self.assertIs(snapshot, recovered)
         self.assertEqual(returned, fingerprint)
         next_snapshot.assert_called_once_with(unittest.mock.ANY, 3.0)
+        emit.assert_called_once()
+
+    def test_persistent_baseline_waits_for_a_second_matching_identity(self) -> None:
+        initial = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        intermittent = [
+            DetailFingerprint(("皮卡丘",), f"cp{value}", "60/60hp", "", "0.4m")
+            for value in range(501, 505)
+        ]
+        detail = Snapshot("initial", "initial")
+        samples = [Snapshot("", f"frame-{index}") for index in range(5)]
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            side_effect=samples,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=[*intermittent, initial],
+        ), patch("pogo_iphone_renamer.batch_navigation_v26.base.emit") as emit:
+            returned, fingerprint = _stable_baseline(
+                object(), detail, initial
+            )
+
+        self.assertIs(returned, samples[-1])
+        self.assertEqual(fingerprint, initial)
+        self.assertEqual(next_snapshot.call_count, 5)
         emit.assert_called_once()
 
     def test_unknown_sort_order_probes_opposite_direction_and_remembers_it(self) -> None:
