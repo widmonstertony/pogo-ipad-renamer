@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,9 @@ from .gui_native import collect_native_status
 
 
 def friendly_ipad_landscape_event(line: str) -> str | None:
-    stripped = line.strip()
+    # Native RapidOCR logs can be wrapped in terminal ANSI colour sequences.
+    # Strip them before filtering so the UI remains a user-facing progress log.
+    stripped = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
     if not stripped:
         return None
     if stripped.startswith("[INFO]") and "RapidOCR" in stripped:

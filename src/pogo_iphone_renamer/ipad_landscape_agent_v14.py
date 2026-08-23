@@ -32,6 +32,14 @@ def storage_capacity_visible(text: str) -> bool:
         r"(?<![\w.])([0-9][0-9,. ]{0,11})\s*/\s*([0-9][0-9,. ]{0,11})(?![\w.])",
         text,
     ):
+        # A Pokémon detail page uses the same numeric shape for HP (for
+        # example ``306 / 306 HP``).  It is never storage capacity, even
+        # though the HP maximum can exceed the minimum storage threshold.
+        # Check the text immediately following this exact match so a detail
+        # page cannot be reclassified as INVENTORY between identity proof and
+        # opening the appraisal menu.
+        if re.match(r"\s*hp\b", text[match.end() :], re.IGNORECASE):
+            continue
         left_digits = re.sub(r"\D", "", match.group(1))
         right_digits = re.sub(r"\D", "", match.group(2))
         if not left_digits or not right_digits:

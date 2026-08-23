@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.ipad_landscape_agent_v22 import (
     RenameFieldVerificationUnavailable,
+    _cancel_unverified_input,
     _commit_after_dismissing_keyboard,
     _dialog_evidence_after_keyboard_dismiss,
     _finalize_verified_commit,
     _submit_with_one_verified_retry,
+    _tap_accessibility_cancel,
     _tap_accessibility_ok,
 )
 from pogo_iphone_renamer.policy import PolicyViolation
@@ -92,7 +94,7 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         ) as ocr_ok, patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
             return_value=detail,
-        ), patch(
+        ) as read, patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v22.ocr_mcp_screenshot",
             return_value=(),
         ), patch(
@@ -111,6 +113,7 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         self.assertIs(returned, detail)
         accessibility_ok.assert_called_once()
         ocr_ok.assert_not_called()
+        read.assert_called_once_with(unittest.mock.ANY, 1.0)
 
     def test_accessibility_ok_retry_uses_exact_returned_point(self) -> None:
         calls: list[tuple[str, dict]] = []
@@ -173,7 +176,7 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
         ):
-            _commit_after_dismissing_keyboard(
+            committed_detail = _commit_after_dismissing_keyboard(
                 proxy,
                 current_name="滑滑小子",
                 species="滑滑小子",
@@ -185,6 +188,7 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         self.assertEqual(ok.call_count, 1)
         self.assertEqual(proxy.verified_renames, 1)
         self.assertIsNone(proxy.pending_name)
+        self.assertIs(committed_detail, detail)
 
     def test_unchanged_dialog_reverifies_field_then_retries(self) -> None:
         nickname = "瑪瑙水母❼❾⓿³⁶"
@@ -313,6 +317,133 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         validate.assert_called_once_with("DETAIL", detail)
         self.assertIsNone(proxy.pending_name)
         self.assertEqual(proxy.verified_renames, 0)
+
+    def test_cancel_waits_through_transient_non_detail_frame(self) -> None:
+        dialog = Snapshot("rename dialog", "dialog")
+        transient = Snapshot("transition", "transient")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(token="token", text="重新命名"),
+            pending_name="滑滑小子❻❷⓬⁴⁴",
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.dismiss_active_keyboard",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.rename_dialog_visible",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.ocr_mcp_screenshot",
+            return_value=(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.tap_cancel"
+        ) as cancel, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            side_effect=[dialog, transient, detail],
+        ) as read, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._validate_expected",
+            side_effect=[PolicyViolation("temporary frame"), None],
+        ) as validate, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ):
+            with self.assertRaises(RenameFieldVerificationUnavailable) as raised:
+                _cancel_unverified_input(proxy, "")
+
+        cancel.assert_called_once_with(proxy)
+        self.assertIs(raised.exception.snapshot, detail)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(validate.call_count, 2)
+        self.assertIsNone(proxy.pending_name)
+
+    def test_missing_cancel_control_recovers_from_a_verified_detail_without_retrying_a_tap(self) -> None:
+        dialog = Snapshot("rename dialog", "dialog")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(token="token", text="重新命名"),
+            pending_name="火球鼠❼❼⓭⁶⁰",
+        )
+        cancel_error = PolicyViolation("详情页未定位到精确名称文字框：取消")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.dismiss_active_keyboard",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.rename_dialog_visible",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.ocr_mcp_screenshot",
+            return_value=(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.tap_cancel",
+            side_effect=cancel_error,
+        ) as ocr_cancel, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._tap_accessibility_cancel",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            side_effect=[dialog, detail],
+        ) as read, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._validate_expected"
+        ) as validate, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ) as emit:
+            with self.assertRaises(RenameFieldVerificationUnavailable) as raised:
+                _cancel_unverified_input(proxy, "unverified field")
+
+        ocr_cancel.assert_called_once_with(proxy)
+        self.assertIs(raised.exception.snapshot, detail)
+        self.assertEqual(read.call_count, 2)
+        validate.assert_called_once_with("DETAIL", detail)
+        self.assertIsNone(proxy.pending_name)
+        self.assertIn("取消控件在最终截图中已消失", emit.call_args.kwargs["message"])
+
+    def test_accessibility_cancel_uses_only_the_exact_current_control(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(
+                token="fresh-token", text="重新命名", width=1024, height=1366
+            ),
+            call_tool=Mock(return_value={}),
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.exact_accessibility_tap_point",
+            return_value=(992.0, 910.0),
+        ) as point, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ) as emit:
+            self.assertTrue(_tap_accessibility_cancel(proxy))
+
+        point.assert_called_once_with(proxy, "取消")
+        proxy.call_tool.assert_called_once_with(
+            "tap_screen",
+            {
+                "x": 992.0,
+                "y": 910.0,
+                "_observation_token": "fresh-token",
+                "_intent": "navigate exact accessibility cancel rename dialog without submitting",
+                "_expected_after": "DETAIL",
+            },
+        )
+        self.assertIn("精确取消触点", emit.call_args.kwargs["message"])
+
+    def test_stage_manager_cancel_uses_calibrated_anchor_not_portrait_ax_point(
+        self,
+    ) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(
+                token="fresh-token", text="重新命名", width=1366, height=1024
+            )
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._tap"
+        ) as tap, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.exact_accessibility_tap_point"
+        ) as point, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ) as emit:
+            self.assertTrue(_tap_accessibility_cancel(proxy))
+
+        tap.assert_called_once_with(proxy, "RENAME_CANCEL")
+        point.assert_not_called()
+        self.assertIn("Stage Manager 取消锚点", emit.call_args.kwargs["message"])
 
     def test_second_rename_manual_fallback_clears_pending_state(self) -> None:
         proxy = _Proxy(verified=1, pending="走路草❶⓫❽⁴⁴")

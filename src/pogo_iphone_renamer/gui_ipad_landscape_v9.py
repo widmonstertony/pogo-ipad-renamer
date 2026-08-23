@@ -4,8 +4,11 @@ import json
 import os
 import subprocess
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
+from .background_batch_runner import background_run_is_active, request_background_stop
 from .batch_pause import BatchPauseFile
 from .gui import AppSettings, save_settings
 from .gui_hdpi import enable_per_monitor_dpi, project_root
@@ -13,7 +16,6 @@ from .gui_ipad_landscape import friendly_ipad_landscape_event
 from .gui_ipad_landscape_v6 import collect_deterministic_status
 from .gui_ipad_landscape_v8 import IPadLandscapeRenamerAppV8
 from .gui_native import python_worker_command
-from .power_awake import AwakeGuard
 
 
 def batch_progress_event(line: str) -> dict[str, object] | None:
@@ -26,7 +28,32 @@ def batch_progress_event(line: str) -> dict[str, object] | None:
     return event
 
 
+def background_runner_command(
+    python_command: list[str], *, mode: str, root: Path
+) -> list[str]:
+    """Start a runner that is independent from the lifetime of the Tk window."""
+
+    return [
+        *python_command,
+        "-u",
+        "-m",
+        "pogo_iphone_renamer.background_batch_runner",
+        "--mode",
+        mode,
+        "--root",
+        str(root),
+    ]
+
+
 class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
+    _LIVE_LOG_NAME = "gui-live.log"
+
+    def _batch_state_path(self) -> Path:
+        return self.root / ".pogo-data" / "batch-state.json"
+
+    def _background_log_path(self) -> Path:
+        return self.root / ".pogo-data" / "background-worker.log"
+
     def _build_ui(self) -> None:
         super()._build_ui()
         # The inherited single-Pokemon UI deliberately forces this variable to
@@ -77,10 +104,78 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self._append_log("昵称同时遵守 12 字符与 24 UTF-8 字节限制；长物种名会保留可提交的最长前缀。")
         self._append_log("单只鉴定条持续不可读时保留原名，安全返回详情并继续下一只。")
         self._append_log("OK 提交会先只读等待慢响应；重试前重新逐字核验昵称，最多四次。")
-        self._append_log("连续黑帧先验证主屏；必要时仅做一次电源唤醒重置，再决定是否重启游戏。")
+        self._append_log("连续黑帧只读等待；为保留当前详情页，不会返回主屏幕、重新打开或重启游戏。")
         self._append_log("截图方向自动兼容：新版 MCP 原生 1366×1024 与旧版旋转帧均可识别。")
         self._append_log("锁屏即安全挂起：即使锁屏截图不是黑色，也会等待你手动解锁后原位继续。")
-        self._append_log("批次运行期间电脑与显示器保持唤醒；结束或停止后自动恢复原电源策略。")
+        self._append_log("批次由独立后台进程持有；Mac 锁屏或关闭窗口后继续运行，结束或停止后恢复电源策略。")
+        self._install_accessible_batch_controls()
+        if background_run_is_active(self._batch_state_path()):
+            self._set_running(True, True)
+            self._append_log("检测到已在后台运行的批量任务；本窗口可查看记录或立即停止。")
+
+    def _append_log(self, message: str) -> None:
+        """Show a message in Tk and preserve an inspectable local run record.
+
+        macOS Accessibility can expose the native menu while omitting Tk's
+        scrolling text widget.  Mirroring the same user-visible line gives a
+        launcher or support session a reliable audit trail without changing the
+        batch worker or its safety decisions.
+        """
+
+        super()._append_log(message)
+        try:
+            log_path = self.root / ".pogo-data" / self._LIVE_LOG_NAME
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            with log_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(f"[{timestamp}] {message}\n")
+        except OSError:
+            # Failure to preserve diagnostics must never prevent safe UI use.
+            pass
+
+    def _install_accessible_batch_controls(self) -> None:
+        """Expose batch commands through the native macOS menu bar.
+
+        Some Tk builds omit child widgets from macOS Accessibility, while menu
+        items remain reliably visible to keyboard and computer-control tools.
+        These commands use the exact same guarded start/pause code as the
+        visible buttons; they are an accessible UI path, not a separate runner.
+        """
+
+        menu_bar = self.tk.Menu(self.window)
+        batch_menu = self.tk.Menu(menu_bar, tearoff=False)
+        batch_menu.add_command(
+            label="开始不限量批量改名",
+            accelerator="⌃⇧R",
+            command=self._start_unlimited_from_menu,
+        )
+        batch_menu.add_command(
+            label="开始不限量只读扫描",
+            accelerator="⌃⇧S",
+            command=self._start_unlimited_scan_from_menu,
+        )
+        batch_menu.add_separator()
+        batch_menu.add_command(label="安全暂停／继续", command=self.toggle_pause)
+        menu_bar.add_cascade(label="批量", menu=batch_menu)
+        self.window.configure(menu=menu_bar)
+        self.window.bind_all("<Control-Shift-R>", self._on_unlimited_rename_shortcut)
+        self.window.bind_all("<Control-Shift-S>", self._on_unlimited_scan_shortcut)
+
+    def _on_unlimited_rename_shortcut(self, _event=None) -> str:
+        self._start_unlimited_from_menu()
+        return "break"
+
+    def _on_unlimited_scan_shortcut(self, _event=None) -> str:
+        self._start_unlimited_scan_from_menu()
+        return "break"
+
+    def _start_unlimited_from_menu(self) -> None:
+        self.unlimited_var.set(True)
+        self.start_run(True)
+
+    def _start_unlimited_scan_from_menu(self) -> None:
+        self.unlimited_var.set(True)
+        self.start_run(False)
 
     def _sync_limit_input(self) -> None:
         running = bool(getattr(self, "_batch_running", False))
@@ -101,6 +196,14 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
     def start_run(self, write_enabled: bool) -> None:
         if self.process and self.process.poll() is None:
             self.messagebox.showinfo("任务正在运行", "请先停止当前任务。", parent=self.window)
+            return
+        if background_run_is_active(self._batch_state_path()):
+            self.messagebox.showinfo(
+                "后台任务正在运行",
+                "已有批量任务在后台持续运行。锁屏或关闭窗口不会停止它；"
+                "请先重新打开控制窗口后查看记录，或使用“立即停止”。",
+                parent=self.window,
+            )
             return
         try:
             self.settings = self._read_form()
@@ -136,15 +239,6 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         threading.Thread(target=self._run_worker, args=(write_enabled,), daemon=True).start()
 
     def _run_worker(self, write_enabled: bool) -> None:
-        awake = AwakeGuard()
-        awake_description: str | None = None
-        try:
-            awake_description = awake.acquire()
-            if awake_description:
-                self.events.put(("log", awake_description + "。"))
-        except OSError as exc:
-            self.events.put(("fatal", f"无法启用批次防睡眠，任务未启动：{exc}"))
-            return
         try:
             status = collect_deterministic_status(self.settings)
             self.events.put(("status", status))
@@ -152,13 +246,12 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
             if missing:
                 self.events.put(("fatal", "启动失败：" + "、".join(missing) + " 尚未就绪。"))
                 return
-            command = python_worker_command(str(status["opencode"]["path"])) + [
-            "-u",
-            "-m",
-            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26",
-            "--mode",
-            "rename" if write_enabled else "scan",
-        ]
+            mode = "rename" if write_enabled else "scan"
+            command = background_runner_command(
+                python_worker_command(str(status["opencode"]["path"])),
+                mode=mode,
+                root=self.root,
+            )
             environment = os.environ.copy()
             environment.update(
                 {
@@ -178,28 +271,38 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 "POGO_OBSERVATION_TTL_SECONDS": "120",
                 "POGO_JOURNAL_PATH": str(self.root / ".pogo-data" / "actions.jsonl"),
                 "POGO_PAUSE_FILE": str(self.pause_control.path),
+                "POGO_BACKGROUND_LOG": str(self._background_log_path()),
+                "POGO_BATCH_STATE": str(self._batch_state_path()),
                 }
             )
+            background_log = self._background_log_path()
+            background_log.parent.mkdir(parents=True, exist_ok=True)
+            background_log.touch(exist_ok=True)
+            cursor = background_log.stat().st_size
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if os.name == "nt":
+                creation_flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             self.process = subprocess.Popen(
                 command,
                 cwd=self.root,
                 env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+                start_new_session=os.name != "nt",
             )
-            assert self.process.stdout is not None
-            for line in self.process.stdout:
-                progress = batch_progress_event(line)
-                if progress is not None:
-                    self.events.put(("progress", progress))
-                message = friendly_ipad_landscape_event(line)
-                if message:
-                    self.events.put(("log", message))
+            self.events.put(
+                (
+                    "log",
+                    "后台批量进程已独立启动；Mac 锁屏或关闭此窗口后任务仍会继续。",
+                )
+            )
+            threading.Thread(
+                target=self._relay_background_log,
+                args=(self.process, background_log, cursor),
+                daemon=True,
+            ).start()
             code = self.process.wait()
             self.events.put(("finished", code))
         except OSError as exc:
@@ -207,9 +310,28 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         finally:
             self.pause_control.resume()
             self.process = None
-            awake.release()
-            if awake_description:
-                self.events.put(("log", "电脑防睡眠已释放；系统电源策略已恢复。"))
+
+    def _relay_background_log(
+        self, process: subprocess.Popen[str], path: Path, cursor: int
+    ) -> None:
+        """Mirror detached-runner records into the visible Tk log while open."""
+
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(cursor)
+                while True:
+                    line = handle.readline()
+                    if line:
+                        _, separator, message = line.partition("] ")
+                        self.events.put(("log", (message if separator else line).rstrip()))
+                        continue
+                    if process.poll() is not None:
+                        return
+                    time.sleep(0.15)
+        except OSError:
+            # The detached worker remains authoritative even if the display
+            # relay cannot reopen its diagnostic file.
+            return
 
     def toggle_pause(self) -> None:
         if self.pause_control.requested:
@@ -262,7 +384,23 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
             self.pause_control.resume()
 
     def stop_run(self) -> None:
-        super().stop_run()
+        if self.process and self.process.poll() is None:
+            super().stop_run()
+            return
+        if request_background_stop(self._batch_state_path()):
+            self._append_log("已请求后台任务安全停止；它会关闭当前控制并恢复电源策略。")
+            self._set_running(False, False)
+
+    def _on_close(self) -> None:
+        if self.process and self.process.poll() is None:
+            keep_running = self.messagebox.askyesno(
+                "后台任务仍在运行",
+                "关闭窗口不会停止当前批量任务；它会在锁屏后继续运行。\n\n关闭控制窗口吗？",
+                parent=self.window,
+            )
+            if not keep_running:
+                return
+        self.window.destroy()
 
 
 def main(argv: list[str] | None = None) -> int:

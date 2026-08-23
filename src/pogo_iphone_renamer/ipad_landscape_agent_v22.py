@@ -5,6 +5,7 @@ import argparse
 from . import ipad_landscape_agent as base
 from . import ipad_landscape_agent_v13 as v13
 from . import ipad_landscape_agent_v14 as v14
+from .appraisal_agent import Snapshot
 from . import ipad_landscape_agent_v16 as v16
 from .config import Settings
 from .device_run_lock import DeviceRunLock
@@ -30,6 +31,12 @@ _FIELD_READ_RETRY_LIMIT = 3
 _DIALOG_READ_RETRY_LIMIT = 5
 _SUBMIT_TAP_LIMIT = 4
 _SUBMIT_OUTCOME_READ_LIMIT = 3
+_CANCEL_DETAIL_READ_LIMIT = 5
+# These are only the initial, read-only fast paths.  Every caller retains its
+# existing bounded retry count and later, slower observations.  In particular,
+# a fast frame never authorizes an extra OK tap by itself.
+_FIELD_READ_RETRY_DELAY_SECONDS = 0.6
+_FIRST_SUBMIT_OUTCOME_DELAY_SECONDS = 1.0
 
 
 class RenameFieldVerificationUnavailable(PolicyViolation):
@@ -65,12 +72,19 @@ def _verified_entered_value_with_read_only_retry(
                     "只读取等待 accessibility 稳定，不重复输入、不点击 OK。"
                 ),
             )
-            base._next_snapshot(proxy, 0.8)
+            base._next_snapshot(proxy, _FIELD_READ_RETRY_DELAY_SECONDS)
     return last
 
 
 def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
-    """Cancel an unsubmitted edit and prove return to DETAIL."""
+    """Cancel an unsubmitted edit and read-only wait for DETAIL.
+
+    Stage Manager can expose one transient composition immediately after the
+    cancel tap.  Treating that single frame as an inventory page used to make
+    the outer batch state machine click the first card again.  After a cancel
+    there is no valid reason to touch the screen until DETAIL is proven, so
+    retry only the observation and never re-enter navigation here.
+    """
 
     dismissed = dismiss_active_keyboard(proxy)
     dialog = base._next_snapshot(proxy, 0.8 if dismissed else 0.4)
@@ -83,11 +97,62 @@ def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
     if proxy.observation is None:
         raise PolicyViolation("取消不可核验输入前缺少安全观察")
     proxy.observation.text += "\n重新命名（输入字段不可核验；仅取消恢复，不提交）"
-    tap_cancel(proxy)
-    detail = base._next_snapshot(proxy, 1.5)
-    base._validate_expected("DETAIL", detail)
-    proxy.pending_name = None
-    raise RenameFieldVerificationUnavailable(detail, actual)
+    try:
+        tap_cancel(proxy)
+    except PolicyViolation as cancel_error:
+        # The game sometimes keeps the dialog in accessibility while the
+        # locally-captured frame has already dropped its Cancel text.  The
+        # exact, unique accessibility control is a safer recovery than
+        # guessing a second OCR coordinate: it is fresh, clickable, and must
+        # still be on this proven rename dialog.  It only cancels the pending
+        # edit; it cannot submit a nickname.
+        if _tap_accessibility_cancel(proxy):
+            cancel_error = None
+        else:
+            # The rename field can disappear between the first dialog proof
+            # and the OCR-controlled Cancel read.  This has no successful-
+            # commit evidence (we never pressed OK), so do not try another
+            # coordinate or restart the batch.  A fresh, proven DETAIL frame
+            # is enough to leave this one unrecorded and continue; the next
+            # pass will still preserve it if the game happened to show a
+            # custom name.
+            detail = base._next_snapshot(proxy, 0.5)
+            try:
+                base._validate_expected("DETAIL", detail)
+            except (PolicyViolation, ValueError):
+                raise cancel_error
+            proxy.pending_name = None
+            emit(
+                "status",
+                message=(
+                    "取消控件在最终截图中已消失；已只读确认详情页，"
+                    "未记录本只改名并安全继续。"
+                ),
+            )
+            raise RenameFieldVerificationUnavailable(detail, actual) from cancel_error
+    last_error: Exception | None = None
+    for attempt in range(1, _CANCEL_DETAIL_READ_LIMIT + 1):
+        detail = base._next_snapshot(proxy, 1.5 if attempt == 1 else 1.0)
+        try:
+            base._validate_expected("DETAIL", detail)
+        except (PolicyViolation, ValueError) as exc:
+            last_error = exc
+            if attempt < _CANCEL_DETAIL_READ_LIMIT:
+                emit(
+                    "status",
+                    message=(
+                        f"取消后详情页第 {attempt} 帧尚未稳定；"
+                        "只读等待，不会重新点击盒子卡片。"
+                    ),
+                )
+                continue
+            break
+        proxy.pending_name = None
+        raise RenameFieldVerificationUnavailable(detail, actual)
+
+    raise PolicyViolation(
+        "取消未提交改名后连续只读等待仍未验证到详情页；未重新点击盒子卡片"
+    ) from last_error
 
 
 def _submit_with_one_verified_retry(
@@ -143,7 +208,11 @@ def _submit_with_one_verified_retry(
         for read_attempt in range(1, _SUBMIT_OUTCOME_READ_LIMIT + 1):
             candidate = base._next_snapshot(
                 proxy,
-                3.0 if attempt == 0 and read_attempt == 1 else 1.25,
+                (
+                    _FIRST_SUBMIT_OUTCOME_DELAY_SECONDS
+                    if attempt == 0 and read_attempt == 1
+                    else 1.25
+                ),
             )
             if not candidate.image:
                 if read_attempt < _SUBMIT_OUTCOME_READ_LIMIT:
@@ -279,6 +348,46 @@ def _tap_accessibility_ok(proxy: SafeProxy) -> bool:
     return True
 
 
+def _tap_accessibility_cancel(proxy: SafeProxy) -> bool:
+    """Cancel when local OCR is stale, preserving Stage Manager calibration."""
+
+    observation = proxy.observation
+    if observation is None:
+        raise PolicyViolation("accessibility 取消缺少安全观察")
+
+    # Accessibility exposes this iPad's text field on a 1024-point portrait
+    # surface, while tap_screen uses the 1366×1024 landscape desktop.  Those
+    # coordinates are not interchangeable in Stage Manager.  The dialog was
+    # already jointly proven by its exact field and controls above, so use the
+    # calibrated in-window Cancel anchor rather than reusing the portrait AX
+    # point.  It is mapped through the freshly measured game-window bounds.
+    if (
+        base.ORIENTATION == "STAGE_MANAGER_MAXIMIZED"
+        and observation.width is not None
+        and observation.height is not None
+        and observation.width > observation.height
+    ):
+        base._tap(proxy, "RENAME_CANCEL")
+        emit("status", message="本次取消使用已校准的 Stage Manager 取消锚点。")
+        return True
+
+    point = exact_accessibility_tap_point(proxy, "取消")
+    if point is None:
+        return False
+    proxy.call_tool(
+        "tap_screen",
+        {
+            "x": point[0],
+            "y": point[1],
+            "_observation_token": observation.token,
+            "_intent": "navigate exact accessibility cancel rename dialog without submitting",
+            "_expected_after": "DETAIL",
+        },
+    )
+    emit("status", message="本次取消使用 accessibility 返回的精确取消触点。")
+    return True
+
+
 def _finalize_verified_commit(
     proxy: SafeProxy,
     *,
@@ -317,7 +426,7 @@ def _commit_after_dismissing_keyboard(
     current_name: str,
     species: str,
     nickname: str,
-) -> None:
+) -> Snapshot:
     verified_before = proxy.verified_renames
     count = _backspace_current_name(proxy, current_name)
     _mark_rename_observation(proxy, f"已发送与精确原名等长的 {count} 次退格")
@@ -374,6 +483,10 @@ def _commit_after_dismissing_keyboard(
         species=species,
         nickname=nickname,
     )
+    # _submit_with_one_verified_retry already proved that this is DETAIL and
+    # that the rename dialog disappeared.  Returning the same fresh snapshot
+    # avoids a redundant screenshot immediately afterward in batch mode.
+    return detail
 
 
 def run(mode: str, settings: Settings) -> int:

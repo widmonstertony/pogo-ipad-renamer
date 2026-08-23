@@ -147,7 +147,7 @@ def wait_for_capture_channel(
     proxy: SafeProxy,
     snapshot: Snapshot,
     *,
-    allow_game_restart: bool = True,
+    allow_game_restart: bool = False,
 ) -> Snapshot:
     snapshot = wait_for_unlocked_snapshot(proxy, snapshot)
     if not v14.snapshot_is_black(snapshot):
@@ -174,6 +174,12 @@ def wait_for_capture_channel(
                 emit("status", message="解锁后截图已恢复，继续识别当前游戏页面。")
                 return snapshot
             deadline = time.monotonic() + 12.0
+
+    if not allow_game_restart:
+        raise PolicyViolation(
+            "当前宝可梦处理中截图连续 12 秒为纯黑；"
+            "为保留当前详情页，未返回主屏幕、未重新打开或重启游戏，任务安全停止"
+        )
 
     emit(
         "status",
@@ -204,11 +210,6 @@ def wait_for_capture_channel(
             "确认故障仅在 Pokémon GO，现只强制重启该游戏一次。"
         ),
     )
-    if not allow_game_restart:
-        raise PolicyViolation(
-            "当前宝可梦处理中截图仍为纯黑；已完成安全的前后台恢复，"
-            "但禁止在处理中强制重启游戏，任务保持原状态停止"
-        )
     restart_game_for_capture(proxy)
     deadline = time.monotonic() + 75.0
     while time.monotonic() < deadline:

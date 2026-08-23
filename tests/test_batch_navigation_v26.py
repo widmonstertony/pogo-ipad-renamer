@@ -12,12 +12,37 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
     VerifiedEndOfStorage,
     _observe_after_swipe,
     _swipe_next_once,
+    detail_fingerprint,
     fingerprints_differ,
     swipe_to_verified_next,
 )
 
 
 class DetailFingerprintTests(unittest.TestCase):
+    def test_full_frame_species_recovers_identity_when_name_crop_only_reads_hp(self) -> None:
+        snapshot = Snapshot("CP 500 60/60 HP 6.0 kg", "detail")
+        cropped_name = SimpleNamespace(evidence=("60/60 HP",))
+        full_lines = (
+            SimpleNamespace(text="皮卡丘", confidence=0.99),
+            SimpleNamespace(text="CP500", confidence=0.99),
+            SimpleNamespace(text="60/60HP", confidence=0.99),
+            SimpleNamespace(text="6.0kg", confidence=0.99),
+        )
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.measure_ipad14_6_appraisal",
+            side_effect=ValueError("plain detail"),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.analyze_name_region",
+            return_value=cropped_name,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.ocr_mcp_screenshot",
+            return_value=full_lines,
+        ):
+            fingerprint = detail_fingerprint(snapshot)
+
+        self.assertEqual(fingerprint.name_tokens, ("皮卡丘",))
+        self.assertEqual(fingerprint.cp, "cp500")
+
     def test_swipe_helper_always_issues_the_write_call(self) -> None:
         proxy = SimpleNamespace(
             observation=SimpleNamespace(
@@ -75,7 +100,7 @@ class DetailFingerprintTests(unittest.TestCase):
             "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
-            return_value=(detail, fingerprint, False),
+            return_value=(detail, fingerprint, False, ()),
         ):
             with self.assertRaises(VerifiedEndOfStorage):
                 swipe_to_verified_next(
@@ -100,14 +125,18 @@ class DetailFingerprintTests(unittest.TestCase):
             "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
-            side_effect=[(first, before, False), (second, after, True)],
+            side_effect=[
+                (first, before, False, ()),
+                (second, after, True, (second, second, second)),
+            ],
         ):
-            snapshot, fingerprint = swipe_to_verified_next(
+            next_detail = swipe_to_verified_next(
                 object(), first, before=before
             )
 
-        self.assertIs(snapshot, second)
-        self.assertEqual(fingerprint, after)
+        self.assertIs(next_detail.snapshot, second)
+        self.assertEqual(next_detail.fingerprint, after)
+        self.assertEqual(next_detail.samples, (second, second, second))
         self.assertEqual(swipe.call_count, 2)
 
     def test_never_blindly_retries_when_no_detail_can_be_verified(self) -> None:
@@ -147,17 +176,17 @@ class DetailFingerprintTests(unittest.TestCase):
         ) as swipe, patch(
             "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
             side_effect=[
-                (same, before, False),
-                (same, before, False),
-                (changed, after, True),
+                (same, before, False, ()),
+                (same, before, False, ()),
+                (changed, after, True, (changed, changed, changed)),
             ],
         ):
-            returned, fingerprint = swipe_to_verified_next(
+            next_detail = swipe_to_verified_next(
                 proxy, same, before=before
             )
 
-        self.assertIs(returned, changed)
-        self.assertEqual(fingerprint, after)
+        self.assertIs(next_detail.snapshot, changed)
+        self.assertEqual(next_detail.fingerprint, after)
         self.assertEqual(
             [call.kwargs["direction"] for call in swipe.call_args_list],
             ["left", "left", "right"],
@@ -178,13 +207,17 @@ class DetailFingerprintTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
             side_effect=[false_change] + [before] * 7,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
+            side_effect=[f"hash-{index}" for index in range(8)],
         ):
             observed = _observe_after_swipe(object(), before)
 
         self.assertIsNotNone(observed)
-        _snapshot, fingerprint, changed = observed
+        _snapshot, fingerprint, changed, samples = observed
         self.assertFalse(changed)
         self.assertEqual(fingerprint, before)
+        self.assertEqual(samples, ())
 
     def test_three_matching_changed_fingerprints_prove_next_identity(self) -> None:
         before = DetailFingerprint(
@@ -200,14 +233,40 @@ class DetailFingerprintTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
             side_effect=[after, after, after],
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
+            side_effect=["hash-1", "hash-2", "hash-3"],
         ):
             observed = _observe_after_swipe(object(), before)
 
         self.assertIsNotNone(observed)
-        snapshot, fingerprint, changed = observed
+        snapshot, fingerprint, changed, samples = observed
         self.assertTrue(changed)
         self.assertIs(snapshot, snapshots[-1])
         self.assertEqual(fingerprint, after)
+        self.assertEqual(samples, tuple(snapshots))
+
+    def test_replayed_post_swipe_frame_cannot_count_as_three_new_identities(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        after = DetailFingerprint(
+            ("伊布",), "cp501", "61/61hp", "6.5kg", "0.5m"
+        )
+        cached = Snapshot("", "cached")
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            return_value=cached,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            return_value=after,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
+            return_value="same-post-swipe-hash",
+        ):
+            observed = _observe_after_swipe(object(), before)
+
+        self.assertIsNone(observed)
 
     def test_cached_pre_swipe_pixels_cannot_authorize_another_swipe(self) -> None:
         before = DetailFingerprint(

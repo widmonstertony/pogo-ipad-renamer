@@ -25,6 +25,16 @@ HP_LINE = re.compile(
 )
 NUMBER_TOKEN = re.compile(r"^\d{1,3}$")
 
+# On the calibrated 1366×1024 iPad14,6 detail page, the visible Pokémon name
+# is centered at y=528.5 with a 47 px glyph height.  The former 43%–61% crop
+# also covered the "Lucky Pokémon" label and HP row below it, so a perfectly
+# default name could be falsely treated as a custom nickname.  Keep a modest
+# margin around the actual name row but deliberately exclude those metadata
+# rows.  A real IV/custom name remains on this same name row and is still
+# rejected by the strict species match below.
+NAME_ROW_TOP = 0.47
+NAME_ROW_BOTTOM = 0.55
+
 
 @dataclass(frozen=True)
 class NameRegionResult:
@@ -40,9 +50,9 @@ def analyze_name_region(image_base64: str, orientation: str) -> NameRegionResult
     region = image.crop(
         (
             round(width * 0.30),
-            round(height * 0.43),
+            round(height * NAME_ROW_TOP),
             round(width * 0.70),
-            round(height * 0.61),
+            round(height * NAME_ROW_BOTTOM),
         )
     )
     region = region.resize((region.width * 2, region.height * 2))

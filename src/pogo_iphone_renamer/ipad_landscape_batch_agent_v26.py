@@ -13,6 +13,7 @@ from .appraisal_agent import Snapshot, screen_snapshot
 from .batch_navigation_v26 import (
     DetailFingerprint,
     NoNextPokemon,
+    VerifiedNextDetail,
     VerifiedEndOfStorage,
     detail_fingerprint,
     fingerprints_differ,
@@ -39,7 +40,7 @@ from .ipad_landscape_agent_v24 import (
 )
 from .ipad_landscape_agent_v25 import _navigate_with_complete_stale_recovery
 from .landscape_cv_v6 import measure_ipad14_6_appraisal_v6
-from .local_ocr_v3 import NameRegionResult, analyze_name_region
+from .local_ocr_v3 import HP_LINE, NUMBER_TOKEN, NameRegionResult, analyze_name_region
 from .native_agent import emit
 from .native_agent_v2 import ResilientStreamableHTTPClient
 from .nickname import generate_iv_nickname, iv_percent
@@ -56,6 +57,14 @@ _CONSENSUS_MEASUREMENT_CONFIDENCE = 0.80
 _MEASUREMENT_READ_ONLY_RETRIES = 12
 _DETAIL_IDENTITY_READ_ONLY_RETRIES = 12
 _FRESH_FRAME_HISTORY_LIMIT = 512
+_MAX_TRANSIENT_NAVIGATION_RECOVERIES = 3
+_UNSAFE_STAGE_MANAGER_GEOMETRY = "detected Stage Manager game-window geometry is unsafe"
+# Faster initial read-only sampling on the calibrated iPad.  These never
+# reduce the number of required distinct proof frames: an unsettled capture
+# simply falls through to the existing bounded retry loops.
+_DETAIL_IDENTITY_FAST_READ_DELAY_SECONDS = 0.8
+_MEASUREMENT_FAST_READ_DELAY_SECONDS = 0.9
+_CLOSE_APPRAISAL_FAST_READ_DELAY_SECONDS = 1.0
 
 
 def _snapshot_digest(snapshot: Snapshot) -> str:
@@ -94,6 +103,8 @@ def _detail_name_key(result: NameRegionResult) -> tuple[str, str]:
 def _confirm_fresh_detail_identity(
     proxy: SafeProxy,
     snapshot: Snapshot,
+    *,
+    seed_samples: tuple[Snapshot, ...] = (),
 ) -> tuple[Snapshot, NameRegionResult] | None:
     """Require three distinct, never-before-used detail frames.
 
@@ -104,11 +115,78 @@ def _confirm_fresh_detail_identity(
     """
 
     blocked = set(_frame_history(proxy))
+
+    def confirm_candidates(
+        candidates: tuple[Snapshot, ...],
+        *,
+        default_only: bool,
+    ) -> tuple[Snapshot, NameRegionResult, list[str]] | None:
+        samples: dict[
+            tuple[str, str], list[tuple[Snapshot, NameRegionResult, str]]
+        ] = {}
+        for candidate in candidates:
+            try:
+                base._validate_expected("DETAIL", candidate)
+                digest = _snapshot_digest(candidate)
+            except PolicyViolation:
+                continue
+            if digest in blocked:
+                continue
+            try:
+                result = analyze_name_region(candidate.image, base.ORIENTATION)
+            except PolicyViolation:
+                continue
+            if default_only and (not result.is_default or not result.species):
+                # Reusing post-swipe evidence is an optimization only for a
+                # full, exact default name.  Custom/ambiguous OCR always
+                # performs the historical fresh detail reads before skipping.
+                return None
+            key = _detail_name_key(result)
+            bucket = samples.setdefault(key, [])
+            if digest in {item[2] for item in bucket}:
+                continue
+            bucket.append((candidate, result, digest))
+            if len(bucket) >= 3:
+                result_snapshot, result, _digest = bucket[-1]
+                return result_snapshot, result, [item[2] for item in bucket]
+        return None
+
+    # A successful swipe already required three different pixel frames for
+    # the changed detail.  Re-read their default-name OCR before using them;
+    # this preserves the existing three-frame and exact-name gate while
+    # avoiding two immediately redundant capture round trips.  Tie the seed
+    # to the actual next snapshot so stale evidence cannot leak across cards.
+    if (
+        len(seed_samples) == 3
+        and seed_samples[-1].image == snapshot.image
+    ):
+        seeded = confirm_candidates(seed_samples, default_only=True)
+        if seeded is not None:
+            result_snapshot, result, digests = seeded
+            _remember_fresh_frames(proxy, digests)
+            emit(
+                "status",
+                message=(
+                    "翻页后的三张新鲜身份帧已再次确认同一默认名称："
+                    f"{_display_name(result)}。"
+                ),
+            )
+            return result_snapshot, result
+
     samples: dict[tuple[str, str], list[tuple[Snapshot, NameRegionResult, str]]] = {}
     candidates = [snapshot]
     for attempt in range(_DETAIL_IDENTITY_READ_ONLY_RETRIES):
         if attempt:
-            candidates.append(base._next_snapshot(proxy, 1.0))
+            candidates.append(
+                base._next_snapshot(
+                    proxy,
+                    (
+                        _DETAIL_IDENTITY_FAST_READ_DELAY_SECONDS
+                        if attempt <= 2
+                        else 1.0
+                    ),
+                )
+            )
         candidate = candidates[-1]
         try:
             base._validate_expected("DETAIL", candidate)
@@ -162,6 +240,183 @@ def _ensure_game_foreground(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
         },
     )
     return wait_for_capture_channel(proxy, base._next_snapshot(proxy, 3.0))
+
+
+def _current_detail_only(snapshot: Snapshot) -> bool:
+    """Choose direct-detail or legacy entry automatically and without taps."""
+
+    value = os.getenv("POGO_START_FROM_CURRENT_DETAIL", "auto").strip().casefold()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    try:
+        _require_current_detail(snapshot)
+    except PolicyViolation:
+        # A visible dock is also normal in a live Stage Manager split layout.
+        # Only call it an overview after the detail proof itself has failed.
+        overview_markers = ("程序坞", "dock", "Shijima", "设置")
+        if any(
+            marker.casefold() in snapshot.text.casefold()
+            for marker in overview_markers
+        ):
+            raise PolicyViolation(
+                "当前是 Stage Manager 多窗口总览；请先回到 Pokémon GO 并打开目标详情页"
+            )
+        return False
+    return True
+
+
+def _game_restart_allowed() -> bool:
+    """Keep historical recovery opt-in; a normal navigation miss never relaunches."""
+
+    value = os.getenv("POGO_ALLOW_GAME_RESTART", "false").strip().casefold()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _wait_without_game_restart(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
+    """Wait for a capture frame without moving away from the current detail."""
+
+    return wait_for_capture_channel(proxy, snapshot, allow_game_restart=False)
+
+
+def _navigate_from_current_detail_only(
+    proxy: SafeProxy, snapshot: Snapshot
+):
+    """Open appraisal from a proven detail without permitting entry navigation.
+
+    The historical v14 appraise adapter can start from MAP, MAIN_MENU, or
+    INVENTORY and deliberately walks forward to a detail page.  That is useful
+    for the legacy batch entry, but it is never allowed once this batch has
+    committed to the user's manually opened detail page.  In particular, an
+    unexpected stale/changed frame must stop before the legacy adapter can tap
+    the first visible storage card.
+
+    The adapter normally needs no v14 transition when it begins at DETAIL: it
+    only opens the detail menu, chooses Appraise, and (where required) advances
+    the appraisal dialogue once.  Temporarily reject every legacy transition
+    *and* every tap outside that small allowlist.  The latter also protects the
+    v24 adapter's import-time reference to the historical base navigator.  The
+    original handlers are restored even when an appraisal read fails.
+    """
+
+    snapshot = _require_current_detail(snapshot)
+    original_transition = v14._transition
+    original_tap = base._tap
+    allowed_taps = {
+        "DETAIL",
+        "DETAIL_MENU",
+        "APPRAISAL_DIALOG",
+        "APPRAISAL_CLOSE",
+    }
+
+    def reject_legacy_entry_transition(
+        _proxy: SafeProxy, _candidate: Snapshot, source: str
+    ) -> tuple[Snapshot, str]:
+        raise PolicyViolation(
+            "从当前详情页连续模式检测到意外入口导航 "
+            f"({source})；已安全停止，不会点击精灵球、宝可梦盒、"
+            "第一只可见宝可梦、图鉴，也不会重启游戏"
+        )
+
+    def direct_detail_tap(active_proxy: SafeProxy, key: str) -> None:
+        if key not in allowed_taps:
+            raise PolicyViolation(
+                "从当前详情页连续模式拒绝非详情鉴定操作 "
+                f"({key})；已安全停止，不会点击精灵球、宝可梦盒、"
+                "第一只可见宝可梦、图鉴，也不会重启游戏"
+            )
+        original_tap(active_proxy, key)
+
+    v14._transition = reject_legacy_entry_transition
+    base._tap = direct_detail_tap
+    try:
+        return _navigate_with_complete_stale_recovery(proxy, snapshot)
+    finally:
+        base._tap = original_tap
+        v14._transition = original_transition
+
+
+def _require_current_detail(snapshot: Snapshot) -> Snapshot:
+    """Prove the first detail page without tapping anywhere else."""
+
+    try:
+        base._validate_expected("DETAIL", snapshot)
+    except (PolicyViolation, ValueError) as exc:
+        raise PolicyViolation(
+            "请先手动打开要处理的第一只宝可梦详情页；当前页面未执行精灵球、"
+            "宝可梦盒或重启游戏操作"
+        ) from exc
+    return snapshot
+
+
+def _is_recoverable_navigation_failure(exc: Exception) -> bool:
+    """Identify read-only/transition misses that are safe to recover from.
+
+    None of these failures has an open rename field or a pending name.  A
+    controlled Pokémon GO restart is therefore safer than ending a long UI
+    batch simply because Stage Manager supplied a stale or covered frame.
+    """
+
+    message = str(exc)
+    return any(
+        marker in message
+        for marker in (
+            "详情页稳定身份字段不足",
+            "横向翻页后连续只读采样仍无法确认安全详情页",
+            "翻页前无法取得两帧一致的详情身份",
+            # These are emitted by the calibrated MAP → MAIN_MENU → INVENTORY
+            # entry route before a name field can ever be opened.  A delayed
+            # Stage Manager/game animation must recover the game rather than
+            # end an otherwise unlimited batch.
+            "页面在等待 12 秒后仍为",
+            "点击精灵球后没有验证到主菜单",
+            "点击“寶可夢”后没有验证到宝可梦盒",
+            "点击第一张卡片后没有验证到详情页",
+        )
+    )
+
+
+def _is_unsafe_stage_manager_geometry(exc: Exception) -> bool:
+    """Recognize a transient layout capture before any game touch is allowed."""
+
+    return _UNSAFE_STAGE_MANAGER_GEOMETRY in str(exc)
+
+
+def _recover_from_transient_navigation_failure(proxy: SafeProxy) -> Snapshot:
+    """Restart only the configured game, then return a fresh game frame."""
+
+    screen_snapshot(proxy)
+    observation = proxy.observation
+    if observation is None:
+        raise PolicyViolation("恢复导航前缺少安全观察")
+    proxy.call_tool(
+        "kill_app",
+        {
+            "bundle_id": proxy.settings.pokemon_go_bundle_id,
+            "_observation_token": observation.token,
+            "_intent": "恢复导航：关闭已配置的 Pokémon GO 以清除过期详情帧",
+            "_expected_after": "configured Pokémon GO is stopped",
+        },
+    )
+    time.sleep(1.5)
+    screen_snapshot(proxy)
+    observation = proxy.observation
+    if observation is None:
+        raise PolicyViolation("恢复启动前缺少安全观察")
+    proxy.call_tool(
+        "launch_app",
+        {
+            "bundle_id": proxy.settings.pokemon_go_bundle_id,
+            "_observation_token": observation.token,
+            "_intent": "恢复导航：启动已配置的 Pokémon GO 并重建详情入口",
+            "_expected_after": "configured Pokémon GO is foreground",
+        },
+    )
+    # App-launch animation and Stage Manager composition are read-only waits.
+    return wait_for_capture_channel(
+        proxy, base._next_snapshot(proxy, 4.0), allow_game_restart=True
+    )
 
 
 def _pause_file(settings: Settings) -> BatchPauseFile:
@@ -261,7 +516,12 @@ def _close_appraisal(proxy: SafeProxy) -> Snapshot:
             # observing without touching; only another proven page can
             # authorize the next action.
             candidate = base._next_snapshot(
-                proxy, 1.5 if observation == 0 else 0.8
+                proxy,
+                (
+                    _CLOSE_APPRAISAL_FAST_READ_DELAY_SECONDS
+                    if observation == 0
+                    else 0.8
+                ),
             )
             if v14.snapshot_is_black(candidate):
                 candidate = wait_for_capture_channel(
@@ -307,6 +567,38 @@ def _display_name(result: NameRegionResult) -> str:
     return next((token for token in result.evidence if token.strip()), "自定义昵称")
 
 
+def _appraisal_identity_matches_current_detail(
+    appraisal_name: NameRegionResult, detail_name: NameRegionResult
+) -> bool:
+    """Match an appraisal title to a pre-proven default detail without false skips.
+
+    Detail identity has already been proven by three independent screenshots.
+    The appraisal overlay can make OCR emit a second, clipped copy of the last
+    glyph (for example ``蟲寶包 / 包``).  That is not a different name and
+    must not be treated as a stale MCP frame.  This exception is deliberately
+    narrow: the full known species must match, no numeric annotation is
+    accepted, and every remaining token must be a strict final fragment of the
+    proven species.  All other discrepancies stay safely unreadable.
+    """
+
+    expected = detail_name.species
+    if not expected or appraisal_name.species != expected:
+        return False
+    if appraisal_name.is_default:
+        return True
+    extras: list[str] = []
+    for token in appraisal_name.evidence:
+        candidate = token.strip()
+        if not candidate or candidate == expected or HP_LINE.fullmatch(candidate):
+            continue
+        if NUMBER_TOKEN.fullmatch(candidate):
+            return False
+        extras.append(candidate)
+    return bool(extras) and all(
+        len(token) < len(expected) and expected.endswith(token) for token in extras
+    )
+
+
 def _ensure_plain_detail(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
     """Navigate only as far as a plain detail page, never into appraisal."""
 
@@ -316,17 +608,17 @@ def _ensure_plain_detail(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
     if state == "DETAIL":
         base._validate_expected("DETAIL", snapshot)
         return snapshot
-    order = ["MAP", "MAIN_MENU", "INVENTORY"]
-    if state not in order:
-        raise PolicyViolation(f"批量详情入口不支持当前页面：{state}")
-    for current in order[order.index(state) :]:
-        snapshot = base._ensure_stage_geometry_for_state(
-            proxy, snapshot, current, state_reader=v14.robust_page_state
-        )
-        base._tap(proxy, current)
-        snapshot = base._next_snapshot(proxy)
-        expected = base.ANCHORS[current][3]
-        base._validate_expected(expected, snapshot)
+    supported_entry_states = {"MAP", "MAIN_MENU", "INVENTORY"}
+    while state != "DETAIL":
+        if state not in supported_entry_states:
+            raise PolicyViolation(f"批量详情入口不支持当前页面：{state}")
+        # Use the resilient transition rather than validating the first
+        # post-tap frame.  On a real iPad the menu animation can take longer
+        # than that frame, even though the original page remains proven.  The
+        # transition waits up to 12 seconds and permits one retry only when
+        # the source page is still independently verified.
+        snapshot, state = v14._transition(proxy, snapshot, state)
+    base._validate_expected("DETAIL", snapshot)
     return snapshot
 
 
@@ -367,7 +659,14 @@ def _confirm_low_confidence_measurement(proxy: SafeProxy, snapshot: Snapshot, me
         ),
     )
     for attempt in range(1, _MEASUREMENT_READ_ONLY_RETRIES + 1):
-        retry = base._next_snapshot(proxy, 1.25)
+        retry = base._next_snapshot(
+            proxy,
+            (
+                _MEASUREMENT_FAST_READ_DELAY_SECONDS
+                if attempt <= 2
+                else 1.25
+            ),
+        )
         if v14.snapshot_is_black(retry):
             retry = wait_for_capture_channel(
                 proxy, retry, allow_game_restart=False
@@ -421,9 +720,17 @@ def _process_one(
     *,
     mode: str,
     index: int,
+    current_detail_only: bool = False,
+    identity_seed_samples: tuple[Snapshot, ...] = (),
 ) -> tuple[Snapshot, str]:
-    snapshot = _ensure_plain_detail(proxy, snapshot)
-    detail_identity = _confirm_fresh_detail_identity(proxy, snapshot)
+    snapshot = (
+        _require_current_detail(snapshot)
+        if current_detail_only
+        else _ensure_plain_detail(proxy, snapshot)
+    )
+    detail_identity = _confirm_fresh_detail_identity(
+        proxy, snapshot, seed_samples=identity_seed_samples
+    )
     if detail_identity is None:
         emit(
             "status",
@@ -443,7 +750,12 @@ def _process_one(
         return snapshot, "skipped"
 
     try:
-        appraisal, measurement = _navigate_with_complete_stale_recovery(proxy, snapshot)
+        navigate_to_appraisal = (
+            _navigate_from_current_detail_only
+            if current_detail_only
+            else _navigate_with_complete_stale_recovery
+        )
+        appraisal, measurement = navigate_to_appraisal(proxy, snapshot)
     except AppraisalMeasurementUnavailable as exc:
         # Navigation into Appraise completed and all later operations were
         # screenshots only, so the last known page is still the appraisal
@@ -488,11 +800,7 @@ def _process_one(
         endpoints=list(measurement.endpoints),
     )
     name = analyze_name_region(appraisal.image, base.ORIENTATION)
-    if (
-        not name.is_default
-        or not name.species
-        or name.species != detail_name.species
-    ):
+    if not _appraisal_identity_matches_current_detail(name, detail_name):
         detail = _close_appraisal(proxy)
         evidence = " / ".join(name.evidence) or "鉴定帧未确认默认物种名"
         emit(
@@ -503,6 +811,14 @@ def _process_one(
             ),
         )
         return detail, "unreadable"
+    if not name.is_default:
+        emit(
+            "status",
+            message=(
+                "鉴定页名称 OCR 出现同物种末尾残片；详情页已由三帧确认默认名，"
+                "继续当前一只。"
+            ),
+        )
 
     nickname = generate_iv_nickname(
         detail_name.species,
@@ -548,7 +864,7 @@ def _process_one(
         )
         return exc.snapshot, "unreadable"
     try:
-        _commit_after_dismissing_keyboard(
+        detail = _commit_after_dismissing_keyboard(
             proxy,
             current_name=detail_name.species,
             species=detail_name.species,
@@ -564,7 +880,11 @@ def _process_one(
             ),
         )
         return exc.snapshot, "unreadable"
-    detail = screen_snapshot(proxy)
+    # The returned snapshot was just validated by the submit routine as a
+    # dialog-free DETAIL frame.  Do not spend another MCP screenshot round
+    # trip proving the same condition again.
+    if not isinstance(detail, Snapshot):
+        raise PolicyViolation("提交后没有返回已验证的详情页截图")
     base._validate_expected("DETAIL", detail)
     emit("renamed", nickname=nickname)
     return detail, "renamed"
@@ -576,7 +896,9 @@ def run(mode: str, settings: Settings) -> int:
         previous_wait_until_visible = v14._wait_until_visible
         previous_next_snapshot = base._next_snapshot
         v14._ORIGINAL_NAVIGATE = _navigate_with_read_only_measurement_retry
-        v14._wait_until_visible = wait_for_capture_channel
+        # Appraisal navigation uses this hook.  It must never turn a transient
+        # black MCP frame into a Home/launch/restart sequence.
+        v14._wait_until_visible = _wait_without_game_restart
         try:
             client = ResilientStreamableHTTPClient(settings, timeout=120.0)
             device = base._device_details(client.call_tool("get_device_info", {}))
@@ -611,11 +933,34 @@ def run(mode: str, settings: Settings) -> int:
             # recovery consistent during appraisal, rename verification and
             # next-Pokémon swipes, including non-black lock-screen captures.
             base._next_snapshot = device_aware_next_snapshot
-            snapshot = wait_for_capture_channel(proxy, screen_snapshot(proxy))
-            snapshot = _ensure_game_foreground(proxy, snapshot)
+            snapshot = wait_for_capture_channel(
+                proxy, screen_snapshot(proxy), allow_game_restart=False
+            )
+            current_detail_only = _current_detail_only(snapshot)
+            if current_detail_only:
+                emit(
+                    "status",
+                    message=(
+                        "从当前手动打开的详情页开始；不会点击精灵球、宝可梦盒、"
+                        "图鉴，也不会重启游戏。"
+                    ),
+                )
+                snapshot = _require_current_detail(snapshot)
+            else:
+                try:
+                    snapshot = _ensure_game_foreground(proxy, snapshot)
+                except ValueError as exc:
+                    if (
+                        not _is_unsafe_stage_manager_geometry(exc)
+                        or not _game_restart_allowed()
+                    ):
+                        raise
+                    snapshot = _recover_from_transient_navigation_failure(proxy)
             counts = {"renamed": 0, "skipped": 0, "scanned": 0, "unreadable": 0}
             pause = _pause_file(settings)
             index = 1
+            transient_recoveries = 0
+            identity_seed_samples: tuple[Snapshot, ...] = ()
 
             while (
                 settings.batch_limit == BATCH_LIMIT_UNLIMITED
@@ -633,10 +978,46 @@ def run(mode: str, settings: Settings) -> int:
                     else f"第 {index}/{settings.batch_limit} 只"
                 )
                 emit("status", message=f"正在处理{progress_text}…")
-                detail, outcome = _process_one(proxy, snapshot, mode=mode, index=index)
+                try:
+                    # A post-swipe evidence bundle is bound to precisely one
+                    # next detail.  Consume it before any recovery path so it
+                    # can never be reused after a pause, retry, or restart.
+                    seed_samples = identity_seed_samples
+                    identity_seed_samples = ()
+                    detail, outcome = _process_one(
+                        proxy,
+                        snapshot,
+                        mode=mode,
+                        index=index,
+                        current_detail_only=current_detail_only,
+                        identity_seed_samples=seed_samples,
+                    )
+                    _remember_fresh_frames(proxy, [_snapshot_digest(detail)])
+                    fingerprint = detail_fingerprint(detail)
+                except (PolicyViolation, ValueError) as exc:
+                    if (
+                        not current_detail_only
+                        and _game_restart_allowed()
+                        and
+                        (
+                            _is_recoverable_navigation_failure(exc)
+                            or _is_unsafe_stage_manager_geometry(exc)
+                        )
+                        and transient_recoveries < _MAX_TRANSIENT_NAVIGATION_RECOVERIES
+                    ):
+                        transient_recoveries += 1
+                        emit(
+                            "status",
+                            message=(
+                                f"第 {index} 只的详情身份帧暂不可用；"
+                                f"正在执行第 {transient_recoveries}/"
+                                f"{_MAX_TRANSIENT_NAVIGATION_RECOVERIES} 次游戏恢复后重试。"
+                            ),
+                        )
+                        snapshot = _recover_from_transient_navigation_failure(proxy)
+                        continue
+                    raise
                 counts[outcome] += 1
-                _remember_fresh_frames(proxy, [_snapshot_digest(detail)])
-                fingerprint = detail_fingerprint(detail)
                 _emit_progress(
                     current=index,
                     limit=settings.batch_limit,
@@ -660,9 +1041,11 @@ def run(mode: str, settings: Settings) -> int:
                 )
                 emit("status", message="正在翻到下一只并验证身份变化…")
                 try:
-                    snapshot, next_fingerprint = swipe_to_verified_next(
+                    next_detail: VerifiedNextDetail = swipe_to_verified_next(
                         proxy, detail, before=fingerprint
                     )
+                    snapshot = next_detail.snapshot
+                    identity_seed_samples = next_detail.samples
                 except VerifiedEndOfStorage:
                     emit(
                         "status",
@@ -673,9 +1056,26 @@ def run(mode: str, settings: Settings) -> int:
                     )
                     break
                 except NoNextPokemon as exc:
+                    if (
+                        not current_detail_only
+                        and _game_restart_allowed()
+                        and transient_recoveries < _MAX_TRANSIENT_NAVIGATION_RECOVERIES
+                    ):
+                        transient_recoveries += 1
+                        emit(
+                            "status",
+                            message=(
+                                f"第 {index} 只翻页暂未得到可验证详情；"
+                                f"正在执行第 {transient_recoveries}/"
+                                f"{_MAX_TRANSIENT_NAVIGATION_RECOVERIES} 次游戏恢复后重试。"
+                            ),
+                        )
+                        snapshot = _recover_from_transient_navigation_failure(proxy)
+                        continue
                     raise PolicyViolation(
-                        f"{exc}；为避免误报完成，本轮安全停止"
+                        f"{exc}；连续恢复后仍无法安全翻页，本轮安全停止"
                     ) from exc
+                transient_recoveries = 0
                 index += 1
 
             emit(

@@ -10,6 +10,10 @@ from pogo_iphone_renamer.local_ocr import OCRLine
 
 
 class NameRegionClassificationTests(unittest.TestCase):
+    def test_name_crop_is_limited_to_the_title_row(self) -> None:
+        self.assertEqual(local_ocr_v3.NAME_ROW_TOP, 0.47)
+        self.assertEqual(local_ocr_v3.NAME_ROW_BOTTOM, 0.55)
+
     def classify(self, lines):
         with (
             patch.object(

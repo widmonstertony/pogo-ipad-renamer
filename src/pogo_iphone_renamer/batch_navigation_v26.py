@@ -12,6 +12,7 @@ from .local_ocr import ocr_mcp_screenshot
 from .local_ocr_v3 import analyze_name_region
 from .policy import PolicyViolation
 from .server import SafeProxy
+from .species_db import traditional_chinese_species
 
 
 CP_TOKEN = re.compile(r"^CP\s*\d+$", re.IGNORECASE)
@@ -28,9 +29,24 @@ class VerifiedEndOfStorage(NoNextPokemon):
     """Four swipes remained on the same verified plain-detail identity."""
 
 
+@dataclass(frozen=True)
+class VerifiedNextDetail:
+    """A next-detail identity proven by three fresh post-swipe frames.
+
+    ``samples`` are deliberately returned rather than placed in a mutable
+    proxy cache.  The batch worker will independently re-check every one for
+    a default species name before it may reuse them as rename authorization.
+    """
+
+    snapshot: Snapshot
+    fingerprint: "DetailFingerprint"
+    samples: tuple[Snapshot, ...]
+
+
 MAX_VERIFIED_SWIPE_ATTEMPTS = 4
 OBSERVATIONS_PER_SWIPE = 8
 OBSERVATION_DELAY_SECONDS = 0.8
+FAST_OBSERVATION_DELAY_SECONDS = 0.6
 CHANGED_IDENTITY_CONFIRMATIONS = 3
 BASELINE_OBSERVATIONS = 5
 BASELINE_CONFIRMATIONS = 2
@@ -89,7 +105,8 @@ def detail_fingerprint(snapshot: Snapshot) -> DetailFingerprint:
         if token.strip() and not HP_TOKEN.fullmatch(token.strip())
     )
     cp = hp = weight = height = ""
-    for line in ocr_mcp_screenshot(snapshot.image, base.ORIENTATION):
+    full_screen_lines = ocr_mcp_screenshot(snapshot.image, base.ORIENTATION)
+    for line in full_screen_lines:
         if line.confidence < 0.72:
             continue
         text = line.text.strip()
@@ -102,6 +119,20 @@ def detail_fingerprint(snapshot: Snapshot) -> DetailFingerprint:
             weight = normalized
         elif not height and HEIGHT_TOKEN.fullmatch(text):
             height = normalized
+    if not name_tokens:
+        # The narrow calibrated crop can temporarily land on the HP row while
+        # a detail transition is settling.  A full-frame species read is
+        # sufficient for *identity-only* navigation: it never authorizes a
+        # rename, but prevents a harmless, recoverable OCR miss from ending
+        # the whole batch before it can move to the next card.
+        known_species = {
+            _normalized(line.text)
+            for line in full_screen_lines
+            if line.confidence >= 0.85
+            and line.text in traditional_chinese_species()
+        }
+        if len(known_species) == 1:
+            name_tokens = tuple(known_species)
     fingerprint = DetailFingerprint(name_tokens, cp, hp, weight, height)
     numeric_fields = (cp, hp, weight, height)
     if not name_tokens or not any(numeric_fields):
@@ -163,7 +194,7 @@ def _stable_baseline(
     counts: dict[DetailFingerprint, int] = {initial: 1}
     snapshots: dict[DetailFingerprint, Snapshot] = {initial: detail}
     for _ in range(BASELINE_OBSERVATIONS - 1):
-        candidate = base._next_snapshot(proxy, OBSERVATION_DELAY_SECONDS)
+        candidate = base._next_snapshot(proxy, FAST_OBSERVATION_DELAY_SECONDS)
         try:
             fingerprint = detail_fingerprint(candidate)
         except PolicyViolation:
@@ -178,7 +209,7 @@ def _stable_baseline(
 def _observe_after_swipe(
     proxy: SafeProxy,
     previous: DetailFingerprint,
-) -> tuple[Snapshot, DetailFingerprint, bool] | None:
+) -> tuple[Snapshot, DetailFingerprint, bool, tuple[Snapshot, ...]] | None:
     """Observe a bounded settling window after a swipe.
 
     A changed identity wins only after the same complete fingerprint appears
@@ -190,29 +221,47 @@ def _observe_after_swipe(
     are observation failures, not evidence that navigation is impossible.
     """
 
-    same: tuple[Snapshot, DetailFingerprint, bool] | None = None
+    same: tuple[Snapshot, DetailFingerprint, bool, tuple[Snapshot, ...]] | None = None
     blocked = _blocked_frame_hashes(proxy)
-    changed_counts: dict[DetailFingerprint, int] = {}
-    changed_snapshots: dict[DetailFingerprint, Snapshot] = {}
-    for _ in range(OBSERVATIONS_PER_SWIPE):
-        snapshot = base._next_snapshot(proxy, OBSERVATION_DELAY_SECONDS)
+    changed_samples: dict[DetailFingerprint, list[tuple[Snapshot, str]]] = {}
+    for observation_index in range(OBSERVATIONS_PER_SWIPE):
+        # Let the gesture settle for the first capture, then collect the
+        # remaining independent identity proofs sooner.  All eight reads and
+        # the three-matching-fingerprint threshold remain intact.
+        delay = (
+            OBSERVATION_DELAY_SECONDS
+            if observation_index == 0
+            else FAST_OBSERVATION_DELAY_SECONDS
+        )
+        snapshot = base._next_snapshot(proxy, delay)
         digest = _snapshot_digest(snapshot)
-        if digest and digest in blocked:
+        if not digest or digest in blocked:
             # This exact pixel frame belonged to the Pokemon before the swipe.
-            # It is proof of MCP cache replay, not proof that the gesture was
-            # swallowed, so it must never authorize another swipe.
+            # A missing digest cannot prove that independently captured pixels
+            # changed either.  In both cases this frame must never authorize a
+            # new identity or a subsequent rename.
             continue
         try:
             current = detail_fingerprint(snapshot)
         except PolicyViolation:
             continue
         if fingerprints_differ(previous, current):
-            changed_counts[current] = changed_counts.get(current, 0) + 1
-            changed_snapshots[current] = snapshot
-            if changed_counts[current] >= CHANGED_IDENTITY_CONFIRMATIONS:
-                return changed_snapshots[current], current, True
+            samples = changed_samples.setdefault(current, [])
+            if digest in {sample_digest for _sample, sample_digest in samples}:
+                # Replayed post-swipe pixels are not three independent proofs
+                # of a new detail page.  Do not turn one cached frame into a
+                # reusable three-frame identity.
+                continue
+            samples.append((snapshot, digest))
+            if len(samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
+                return (
+                    snapshot,
+                    current,
+                    True,
+                    tuple(sample for sample, _digest in samples),
+                )
             continue
-        same = snapshot, current, False
+        same = snapshot, current, False, ()
     return same
 
 
@@ -221,7 +270,7 @@ def swipe_to_verified_next(
     detail: Snapshot,
     *,
     before: DetailFingerprint | None = None,
-) -> tuple[Snapshot, DetailFingerprint]:
+) -> VerifiedNextDetail:
     previous = before or detail_fingerprint(detail)
     detail, previous = _stable_baseline(proxy, detail, previous)
     unchanged_confirmations = 0
@@ -241,13 +290,13 @@ def swipe_to_verified_next(
             raise NoNextPokemon(
                 "横向翻页后连续只读采样仍无法确认安全详情页"
             )
-        snapshot, current, changed = observed
+        snapshot, current, changed, samples = observed
         if changed:
             try:
                 setattr(proxy, "_batch_swipe_direction", direction)
             except AttributeError:
                 pass
-            return snapshot, current
+            return VerifiedNextDetail(snapshot, current, samples)
         unchanged_confirmations += 1
         detail = snapshot
     if unchanged_confirmations == MAX_VERIFIED_SWIPE_ATTEMPTS:

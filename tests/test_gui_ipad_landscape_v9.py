@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
-from pogo_iphone_renamer.gui_ipad_landscape_v9 import batch_progress_event
+from pogo_iphone_renamer.gui_ipad_landscape_v9 import (
+    background_runner_command,
+    batch_progress_event,
+)
 from pogo_iphone_renamer.gui_native import python_worker_command
 
 
@@ -33,6 +37,25 @@ class BatchProgressEventTests(unittest.TestCase):
         self.assertEqual(
             python_worker_command("/opt/homebrew/bin/python3", platform_name="posix"),
             ["/opt/homebrew/bin/python3"],
+        )
+
+    def test_gui_starts_detached_background_runner(self) -> None:
+        self.assertEqual(
+            background_runner_command(
+                ["/opt/homebrew/bin/python3"],
+                mode="rename",
+                root=Path("/tmp/pogo"),
+            ),
+            [
+                "/opt/homebrew/bin/python3",
+                "-u",
+                "-m",
+                "pogo_iphone_renamer.background_batch_runner",
+                "--mode",
+                "rename",
+                "--root",
+                "/tmp/pogo",
+            ],
         )
 
 

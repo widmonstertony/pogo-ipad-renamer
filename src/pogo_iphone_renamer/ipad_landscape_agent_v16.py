@@ -22,6 +22,12 @@ from .server import SafeProxy
 from .species_db import traditional_chinese_species
 
 
+# This is a read-only delay after the pencil tap.  If the dialog has not
+# appeared yet, the existing OCR/accessibility proof and one bounded retry
+# remain unchanged.
+_RENAME_DIALOG_INITIAL_READ_DELAY_SECONDS = 0.65
+
+
 class RenamePencilLocalizationUnavailable(PolicyViolation):
     """The verified detail page was readable, but its name row was not.
 
@@ -173,7 +179,7 @@ def _locate_dynamic_pencil_with_read_only_retry(
 def _verified_dialog_snapshot(
     proxy: SafeProxy, current_name: str
 ) -> Snapshot | None:
-    time.sleep(0.9)
+    time.sleep(_RENAME_DIALOG_INITIAL_READ_DELAY_SECONDS)
     image = v7._screenshot_only(proxy)
     lines = ocr_mcp_screenshot(image, base.ORIENTATION)
     verified_by_ocr = rename_dialog_visible(lines)

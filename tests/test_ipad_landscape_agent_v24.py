@@ -31,7 +31,7 @@ class StableFrameRetryTests(unittest.TestCase):
         ):
             returned = _navigate_with_read_only_measurement_retry(object(), Snapshot("", "old"))
         self.assertEqual(returned, (stable, measurement))
-        read.assert_called_once_with(unittest.mock.ANY, 1.5)
+        read.assert_called_once_with(unittest.mock.ANY, 1.0)
 
     def test_stable_dialogue_is_advanced_exactly_once(self) -> None:
         dialogue = Snapshot("", "dialogue")
@@ -43,7 +43,7 @@ class StableFrameRetryTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v24.base._next_snapshot",
             side_effect=[dialogue, bars],
-        ), patch(
+        ) as read, patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v24.base.measure_ipad14_6_appraisal",
             side_effect=[ValueError("no bars"), measurement],
         ), patch(
@@ -58,6 +58,10 @@ class StableFrameRetryTests(unittest.TestCase):
 
         self.assertEqual(returned, (bars, measurement))
         tap.assert_called_once_with(unittest.mock.ANY, "APPRAISAL_DIALOG")
+        self.assertEqual(
+            [call.args[1] for call in read.call_args_list],
+            [1.0, 1.75],
+        )
 
     def test_exhaustion_returns_typed_error_with_last_snapshot(self) -> None:
         last = Snapshot("", "still-transitioning")

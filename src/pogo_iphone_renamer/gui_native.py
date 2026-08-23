@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from .gui import AppSettings, collect_status, save_settings
@@ -21,7 +21,10 @@ def find_python_launcher() -> str | None:
 
 def python_worker_command(launcher: str, *, platform_name: str | None = None) -> list[str]:
     platform_name = os.name if platform_name is None else platform_name
-    if platform_name == "nt" and Path(launcher).name.casefold() in {"py", "py.exe"}:
+    if (
+        platform_name == "nt"
+        and PureWindowsPath(launcher).name.casefold() in {"py", "py.exe"}
+    ):
         return [launcher, "-3.13"]
     return [launcher]
 

@@ -4,11 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.batch_navigation_v26 import DetailFingerprint
 from pogo_iphone_renamer.batch_pause import BatchPauseFile
+from pogo_iphone_renamer import ipad_landscape_agent as base
+from pogo_iphone_renamer import ipad_landscape_agent_v14 as v14
 from pogo_iphone_renamer.ipad_landscape_agent_v24 import (
     AppraisalMeasurementUnavailable,
 )
@@ -19,11 +21,18 @@ from pogo_iphone_renamer.ipad_landscape_agent_v16 import (
     RenamePencilLocalizationUnavailable,
 )
 from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
+    _appraisal_identity_matches_current_detail,
     _close_appraisal,
     _confirm_fresh_detail_identity,
     _confirm_low_confidence_measurement,
     _ensure_game_foreground,
+    _ensure_plain_detail,
+    _current_detail_only,
+    _is_recoverable_navigation_failure,
+    _is_unsafe_stage_manager_geometry,
+    _navigate_from_current_detail_only,
     _process_one,
+    _wait_without_game_restart,
     _wait_at_safe_pause_boundary,
 )
 from pogo_iphone_renamer.landscape_cv import IVMeasurement
@@ -41,6 +50,316 @@ def _default_name(species: str = "可達鴨") -> NameRegionResult:
 
 
 class BatchUnreadableAppraisalTests(unittest.TestCase):
+    def test_appraisal_suffix_fragment_keeps_proven_default_species(self) -> None:
+        detail = _default_name("蟲寶包")
+        appraisal = NameRegionResult(
+            species="蟲寶包",
+            is_default=False,
+            confidence=0.99,
+            evidence=("蟲寶包", "包"),
+        )
+
+        self.assertTrue(_appraisal_identity_matches_current_detail(appraisal, detail))
+
+    def test_appraisal_suffix_exception_rejects_numeric_or_other_text(self) -> None:
+        detail = _default_name("蟲寶包")
+        numeric = NameRegionResult(
+            species="蟲寶包",
+            is_default=False,
+            confidence=0.99,
+            evidence=("蟲寶包", "9"),
+        )
+        other_text = NameRegionResult(
+            species="蟲寶包",
+            is_default=False,
+            confidence=0.99,
+            evidence=("蟲寶包", "亮晶晶"),
+        )
+
+        self.assertFalse(_appraisal_identity_matches_current_detail(numeric, detail))
+        self.assertFalse(_appraisal_identity_matches_current_detail(other_text, detail))
+
+    def test_partial_appraisal_title_does_not_skip_proven_default(self) -> None:
+        before = Snapshot("", "detail")
+        appraisal = Snapshot("", "appraisal")
+        restored_detail = Snapshot("", "restored-detail")
+        measurement = IVMeasurement(10, 2, 1, 0.943, (1, 2, 3), (4, 5, 6))
+        detail_name = _default_name("蟲寶包")
+        partial_appraisal_name = NameRegionResult(
+            species="蟲寶包",
+            is_default=False,
+            confidence=0.99,
+            evidence=("蟲寶包", "包"),
+        )
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._ensure_plain_detail",
+            return_value=before,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_fresh_detail_identity",
+            return_value=(before, detail_name),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            return_value=(appraisal, measurement),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_low_confidence_measurement",
+            return_value=(appraisal, measurement),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.analyze_name_region",
+            return_value=partial_appraisal_name,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
+            return_value=restored_detail,
+        ) as close, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ) as emit:
+            returned, outcome = _process_one(
+                object(), before, mode="scan", index=41
+            )
+
+        self.assertIs(returned, restored_detail)
+        self.assertEqual(outcome, "scanned")
+        close.assert_called_once()
+        self.assertIn("末尾残片", emit.call_args_list[-2].kwargs["message"])
+
+    def test_auto_mode_uses_current_detail_without_navigation(self) -> None:
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ):
+            self.assertTrue(_current_detail_only(detail))
+
+    def test_auto_mode_keeps_legacy_entry_for_a_game_map(self) -> None:
+        game_map = Snapshot("map", "map")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected",
+            side_effect=PolicyViolation("not detail"),
+        ):
+            self.assertFalse(_current_detail_only(game_map))
+
+    def test_auto_mode_rejects_stage_manager_overview_without_navigation(self) -> None:
+        overview = Snapshot("程序坞\nShijima\n设置", "overview")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected",
+            side_effect=PolicyViolation("not detail"),
+        ):
+            with self.assertRaises(PolicyViolation):
+                _current_detail_only(overview)
+
+    def test_detail_capture_wait_never_permits_game_restart(self) -> None:
+        proxy = object()
+        snapshot = Snapshot("detail", "frame")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.wait_for_capture_channel",
+            return_value=snapshot,
+        ) as wait:
+            self.assertIs(_wait_without_game_restart(proxy, snapshot), snapshot)
+
+        wait.assert_called_once_with(proxy, snapshot, allow_game_restart=False)
+
+    def test_current_detail_navigation_refuses_legacy_entry_before_any_tap(self) -> None:
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        original_transition = v14._transition
+
+        def attempt_legacy_entry(proxy, snapshot):
+            return v14._transition(proxy, snapshot, "INVENTORY")
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            side_effect=attempt_legacy_entry,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"
+        ) as tap:
+            with self.assertRaisesRegex(PolicyViolation, "第一只可见宝可梦"):
+                _navigate_from_current_detail_only(object(), detail)
+
+        self.assertIs(v14._transition, original_transition)
+        tap.assert_not_called()
+
+    def test_current_detail_navigation_blocks_frozen_base_inventory_tap(self) -> None:
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+
+        def invoke_frozen_base_navigator(proxy, snapshot):
+            # v24 keeps an import-time reference to the original base
+            # navigator.  Simulate that lower layer asking to tap a storage
+            # card after a classifier disagreement.
+            base._tap(proxy, "INVENTORY")
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            side_effect=invoke_frozen_base_navigator,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"
+        ) as original_tap:
+            with self.assertRaisesRegex(PolicyViolation, "第一只可见宝可梦"):
+                _navigate_from_current_detail_only(object(), detail)
+
+        original_tap.assert_not_called()
+
+    def test_current_detail_navigation_allows_only_appraisal_controls(self) -> None:
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+
+        def direct_appraisal_controls(proxy, snapshot):
+            for key in ("DETAIL", "DETAIL_MENU", "APPRAISAL_DIALOG", "APPRAISAL_CLOSE"):
+                base._tap(proxy, key)
+            return snapshot, object()
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            side_effect=direct_appraisal_controls,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"
+        ) as original_tap:
+            result = _navigate_from_current_detail_only(object(), detail)
+
+        self.assertEqual(result[0], detail)
+        self.assertEqual(
+            [call.args[1] for call in original_tap.call_args_list],
+            ["DETAIL", "DETAIL_MENU", "APPRAISAL_DIALOG", "APPRAISAL_CLOSE"],
+        )
+
+    def test_current_detail_process_uses_guarded_appraisal_navigation(self) -> None:
+        before = Snapshot("", "detail")
+        appraisal = Snapshot("", "appraisal")
+        restored_detail = Snapshot("", "restored-detail")
+        measurement = IVMeasurement(12, 11, 10, 0.95, (1, 2, 3), (4, 5, 6))
+        default = _default_name()
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
+            return_value=before,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_fresh_detail_identity",
+            return_value=(before, default),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_from_current_detail_only",
+            return_value=(appraisal, measurement),
+        ) as direct_navigation, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery"
+        ) as legacy_navigation, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_low_confidence_measurement",
+            return_value=(appraisal, measurement),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.analyze_name_region",
+            return_value=default,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
+            return_value=restored_detail,
+        ):
+            returned, outcome = _process_one(
+                object(), before, mode="scan", index=1, current_detail_only=True
+            )
+
+        self.assertIs(returned, restored_detail)
+        self.assertEqual(outcome, "scanned")
+        direct_navigation.assert_called_once_with(ANY, before)
+        legacy_navigation.assert_not_called()
+
+    def test_successful_commit_reuses_its_verified_detail_snapshot(self) -> None:
+        before = Snapshot("", "detail")
+        appraisal = Snapshot("", "appraisal")
+        ready_for_rename = Snapshot("", "ready-for-rename")
+        committed_detail = Snapshot("CP1 1/1HP 1kg", "committed-detail")
+        measurement = IVMeasurement(12, 11, 10, 0.95, (1, 2, 3), (4, 5, 6))
+        default = _default_name("可達鴨")
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._ensure_plain_detail",
+            return_value=before,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_fresh_detail_identity",
+            return_value=(before, default),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            return_value=(appraisal, measurement),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._confirm_low_confidence_measurement",
+            return_value=(appraisal, measurement),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.analyze_name_region",
+            return_value=default,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
+            return_value=ready_for_rename,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.open_dynamic_rename_from_detail"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._commit_after_dismissing_keyboard",
+            return_value=committed_detail,
+        ) as commit, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.screen_snapshot"
+        ) as screenshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ) as validate, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            returned, outcome = _process_one(
+                object(), before, mode="rename", index=1
+            )
+
+        self.assertIs(returned, committed_detail)
+        self.assertEqual(outcome, "renamed")
+        commit.assert_called_once()
+        screenshot.assert_not_called()
+        validate.assert_called_once_with("DETAIL", committed_detail)
+
+    def test_unsafe_stage_manager_geometry_is_recoverable(self) -> None:
+        self.assertTrue(
+            _is_unsafe_stage_manager_geometry(
+                ValueError("detected Stage Manager game-window geometry is unsafe")
+            )
+        )
+        self.assertFalse(_is_unsafe_stage_manager_geometry(ValueError("bad image")))
+
+    def test_stage_manager_identity_and_swipe_misses_are_recoverable(self) -> None:
+        self.assertTrue(
+            _is_recoverable_navigation_failure(
+                PolicyViolation("详情页稳定身份字段不足；不会自动翻页")
+            )
+        )
+        self.assertTrue(
+            _is_recoverable_navigation_failure(
+                PolicyViolation("横向翻页后连续只读采样仍无法确认安全详情页")
+            )
+        )
+        self.assertTrue(
+            _is_recoverable_navigation_failure(
+                PolicyViolation("页面在等待 12 秒后仍为 MAP，未到达 MAIN_MENU")
+            )
+        )
+        self.assertFalse(
+            _is_recoverable_navigation_failure(PolicyViolation("鉴定条仍可见"))
+        )
+
+    def test_detail_entry_uses_resilient_navigation_until_detail(self) -> None:
+        initial = Snapshot("map", "map")
+        inventory = Snapshot("inventory", "inventory")
+        detail = Snapshot("CP 100 20/20 HP 1 kg", "detail")
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.v14.robust_page_state",
+            return_value="MAP",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.v14._transition",
+            side_effect=[(inventory, "INVENTORY"), (detail, "DETAIL")],
+        ) as transition, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ) as validate:
+            returned = _ensure_plain_detail(object(), initial)
+
+        self.assertIs(returned, detail)
+        self.assertEqual(
+            [call.args[2] for call in transition.call_args_list],
+            ["MAP", "INVENTORY"],
+        )
+        validate.assert_called_once_with("DETAIL", detail)
+
     def test_manual_unlock_home_launches_only_configured_game(self) -> None:
         snapshot = Snapshot("SpringBoard", "home")
 
@@ -324,7 +643,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
             side_effect=[second_snapshot, third_snapshot],
-        ), patch(
+        ) as next_snapshot, patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.v14.snapshot_is_black",
             return_value=False,
         ), patch(
@@ -342,6 +661,10 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
 
         self.assertEqual(returned, (third_snapshot, third))
         self.assertIn("三张未复用像素帧", emit.call_args.kwargs["message"])
+        self.assertEqual(
+            [call.args[1] for call in next_snapshot.call_args_list],
+            [0.9, 0.9],
+        )
 
     def test_detail_identity_rejects_old_hash_and_requires_three_new_frames(self) -> None:
         old = Snapshot("", "old")
@@ -353,7 +676,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
             side_effect=new_frames,
-        ), patch(
+        ) as next_snapshot, patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._snapshot_digest",
             side_effect=["old-hash", "new-1", "new-2", "new-3"],
         ), patch(
@@ -368,6 +691,72 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         self.assertEqual(
             proxy._pogo_verified_frame_history,
             ["old-hash", "new-1", "new-2", "new-3"],
+        )
+        self.assertEqual(
+            [call.args[1] for call in next_snapshot.call_args_list],
+            [0.8, 0.8, 1.0],
+        )
+
+    def test_post_swipe_default_evidence_reuses_three_fresh_frames(self) -> None:
+        seeds = tuple(Snapshot("", f"seed-{index}") for index in range(3))
+        result = _default_name("蟲寶包")
+        proxy = SimpleNamespace(_pogo_verified_frame_history=[])
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot"
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._snapshot_digest",
+            side_effect=["seed-1", "seed-2", "seed-3"],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.analyze_name_region",
+            return_value=result,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ) as emit:
+            confirmed = _confirm_fresh_detail_identity(
+                proxy, seeds[-1], seed_samples=seeds
+            )
+
+        self.assertEqual(confirmed, (seeds[-1], result))
+        self.assertEqual(proxy._pogo_verified_frame_history, ["seed-1", "seed-2", "seed-3"])
+        next_snapshot.assert_not_called()
+        self.assertIn("翻页后的三张新鲜身份帧", emit.call_args.kwargs["message"])
+
+    def test_ambiguous_post_swipe_evidence_falls_back_to_fresh_identity_reads(self) -> None:
+        seeds = tuple(Snapshot("", f"seed-{index}") for index in range(3))
+        fresh = [Snapshot("", f"fresh-{index}") for index in range(2)]
+        ambiguous = NameRegionResult(
+            species="蟲寶包",
+            is_default=False,
+            confidence=0.99,
+            evidence=("蟲寶包", "包"),
+        )
+        verified = _default_name("蟲寶包")
+        proxy = SimpleNamespace(_pogo_verified_frame_history=[])
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
+            side_effect=fresh,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._snapshot_digest",
+            side_effect=["seed-1", "fallback-1", "fallback-2", "fallback-3"],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.analyze_name_region",
+            side_effect=[ambiguous, verified, verified, verified],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            confirmed = _confirm_fresh_detail_identity(
+                proxy, seeds[-1], seed_samples=seeds
+            )
+
+        self.assertEqual(confirmed, (fresh[-1], verified))
+        self.assertEqual(next_snapshot.call_count, 2)
+        self.assertEqual(
+            proxy._pogo_verified_frame_history,
+            ["fallback-1", "fallback-2", "fallback-3"],
         )
 
     def test_appraisal_consensus_does_not_count_duplicate_pixels_twice(self) -> None:

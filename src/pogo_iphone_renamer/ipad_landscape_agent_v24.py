@@ -17,6 +17,12 @@ from .policy import PolicyViolation
 
 _BASE_ORIGINAL_NAVIGATE = v14._ORIGINAL_NAVIGATE
 _READ_ONLY_RETRY_LIMIT = 6
+# The normal iPad path reaches the leader dialogue before the bars.  Start
+# observing it sooner, then keep the historical slower retry cadence if it is
+# still settling.  No additional dialogue tap or measurement acceptance path
+# is introduced by this tuning.
+_FIRST_APPRAISAL_READ_DELAY_SECONDS = 1.0
+_FIRST_DIALOG_READ_DELAY_SECONDS = 1.75
 
 
 class AppraisalMeasurementUnavailable(PolicyViolation):
@@ -35,7 +41,9 @@ def _navigate_with_read_only_measurement_retry(proxy, snapshot):
         return _BASE_ORIGINAL_NAVIGATE(proxy, snapshot)
     except ValueError as first_error:
         last_error: ValueError = first_error
-        last_snapshot = base._next_snapshot(proxy, 1.5)
+        last_snapshot = base._next_snapshot(
+            proxy, _FIRST_APPRAISAL_READ_DELAY_SECONDS
+        )
         if v14.snapshot_is_black(last_snapshot):
             last_snapshot = wait_for_capture_channel(
                 proxy, last_snapshot, allow_game_restart=False
@@ -62,7 +70,10 @@ def _navigate_with_read_only_measurement_retry(proxy, snapshot):
         emit("status", message="验证到鉴定对白未显示 IV 条；只推进一次对白。")
         base._tap(proxy, "APPRAISAL_DIALOG")
         for attempt in range(1, _READ_ONLY_RETRY_LIMIT + 1):
-            retry = base._next_snapshot(proxy, 2.5 if attempt == 1 else 1.5)
+            retry = base._next_snapshot(
+                proxy,
+                _FIRST_DIALOG_READ_DELAY_SECONDS if attempt == 1 else 1.5,
+            )
             if v14.snapshot_is_black(retry):
                 retry = wait_for_capture_channel(
                     proxy, retry, allow_game_restart=False

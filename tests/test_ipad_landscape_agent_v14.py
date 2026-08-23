@@ -142,6 +142,23 @@ class ResilientLandscapeNavigationTests(unittest.TestCase):
     def test_hp_fraction_is_not_storage_capacity(self) -> None:
         self.assertFalse(storage_capacity_visible("95 / 95 HP"))
 
+    def test_high_hp_fraction_is_not_storage_capacity(self) -> None:
+        self.assertFalse(storage_capacity_visible("306 / 306 HP"))
+
+    def test_high_hp_detail_is_not_reclassified_as_inventory(self) -> None:
+        snapshot = Snapshot(text="9987 / 10150", image="current-detail")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v14.snapshot_is_black",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v14._fresh_screenshot_text",
+            return_value=("CP 2020 306 / 306 HP 12.3 kg 1.1 m", True),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v14.base.local_page_state",
+            return_value="DETAIL",
+        ):
+            self.assertEqual(robust_page_state(snapshot), "DETAIL")
+
     def test_black_frame_is_not_a_map(self) -> None:
         self.assertTrue(snapshot_is_black(_snapshot((0, 0, 0))))
         self.assertFalse(snapshot_is_black(_snapshot((30, 60, 90))))

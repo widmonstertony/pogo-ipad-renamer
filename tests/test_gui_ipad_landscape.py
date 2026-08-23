@@ -2,11 +2,31 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from pogo_iphone_renamer.gui_ipad_landscape import friendly_ipad_landscape_event
+from pogo_iphone_renamer.gui_ipad_landscape_v9 import IPadLandscapeRenamerAppV9
 
 
 class IPadLandscapeGuiLogTests(unittest.TestCase):
+    def test_accessible_unlimited_menu_reuses_guarded_start(self) -> None:
+        app = object.__new__(IPadLandscapeRenamerAppV9)
+        app.unlimited_var = SimpleNamespace(set=Mock())
+        app.start_run = Mock()
+
+        app._start_unlimited_from_menu()
+
+        app.unlimited_var.set.assert_called_once_with(True)
+        app.start_run.assert_called_once_with(True)
+
+    def test_ansi_wrapped_rapidocr_log_is_hidden(self) -> None:
+        self.assertIsNone(
+            friendly_ipad_landscape_event(
+                "\x1b[32m[INFO] RapidOCR model cache is ready\x1b[0m"
+            )
+        )
+
     def test_rotation_is_a_supported_navigation_state(self) -> None:
         line = json.dumps(
             {

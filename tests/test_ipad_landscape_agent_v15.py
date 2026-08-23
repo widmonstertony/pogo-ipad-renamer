@@ -15,7 +15,7 @@ from pogo_iphone_renamer.ipad_landscape_agent_v15 import (
     wait_for_manual_unlock,
     wait_for_unlocked_snapshot,
 )
-from pogo_iphone_renamer.policy import Observation
+from pogo_iphone_renamer.policy import Observation, PolicyViolation
 
 
 class _Proxy:
@@ -63,6 +63,29 @@ class CaptureStateTests(unittest.TestCase):
 
         self.assertIs(returned, visible)
         wait.assert_called_once_with(proxy)
+
+    def test_black_capture_without_restart_permission_never_leaves_game(self) -> None:
+        black = SimpleNamespace(image="black")
+        proxy = object()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.wait_for_unlocked_snapshot",
+            return_value=black,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.v14.snapshot_is_black",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.time.monotonic",
+            side_effect=[0.0, 12.1],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.refresh_game_foreground_capture"
+        ) as refresh, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v15.restart_game_for_capture"
+        ) as restart, patch("pogo_iphone_renamer.ipad_landscape_agent_v15.emit"):
+            with self.assertRaisesRegex(PolicyViolation, "未返回主屏幕"):
+                wait_for_capture_channel(proxy, black, allow_game_restart=False)
+
+        refresh.assert_not_called()
+        restart.assert_not_called()
 
     def test_default_manual_unlock_wait_has_no_time_limit(self) -> None:
         proxy = object()
