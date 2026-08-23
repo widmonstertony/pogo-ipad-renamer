@@ -6,12 +6,14 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
+from pogo_iphone_renamer.policy import PolicyViolation
 from pogo_iphone_renamer.batch_navigation_v26 import (
     DetailFingerprint,
     NoNextPokemon,
     VerifiedEndOfStorage,
     _observe_after_swipe,
     _swipe_next_once,
+    _wait_for_post_swipe_identity,
     detail_fingerprint,
     fingerprints_differ,
     swipe_to_verified_next,
@@ -157,6 +159,63 @@ class DetailFingerprintTests(unittest.TestCase):
                 swipe_to_verified_next(object(), detail, before=before)
 
         self.assertEqual(swipe.call_count, 1)
+
+    def test_persistent_mode_waits_read_only_for_post_swipe_identity(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        after = DetailFingerprint(
+            ("伊布",), "cp501", "61/61hp", "6.5kg", "0.5m"
+        )
+        detail = Snapshot("detail", "detail")
+        next_detail = Snapshot("next", "next")
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            return_value=(detail, before),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
+        ) as swipe, patch(
+            "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
+            return_value=None,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._wait_for_post_swipe_identity",
+            return_value=(next_detail, after, True, (next_detail,) * 3),
+        ) as wait:
+            returned = swipe_to_verified_next(object(), detail, before=before)
+
+        self.assertIs(returned.snapshot, next_detail)
+        self.assertEqual(returned.fingerprint, after)
+        swipe.assert_called_once()
+        wait.assert_called_once()
+
+    def test_persistent_post_swipe_wait_recovers_after_ocr_gap(self) -> None:
+        before = DetailFingerprint(
+            ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        unreadable = Snapshot("", "unreadable")
+        recovered = Snapshot("same detail", "recovered")
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot",
+            side_effect=[unreadable, recovered],
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=[PolicyViolation("OCR 暂不可读"), before],
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
+            side_effect=["first", "second"],
+        ), patch("pogo_iphone_renamer.batch_navigation_v26.base.emit") as emit:
+            observed = _wait_for_post_swipe_identity(object(), before)
+
+        self.assertIsNotNone(observed)
+        snapshot, fingerprint, changed, samples = observed
+        self.assertIs(snapshot, recovered)
+        self.assertEqual(fingerprint, before)
+        self.assertFalse(changed)
+        self.assertEqual(samples, ())
+        self.assertEqual(next_snapshot.call_count, 2)
+        emit.assert_called_once()
 
     def test_unknown_sort_order_probes_opposite_direction_and_remembers_it(self) -> None:
         before = DetailFingerprint(

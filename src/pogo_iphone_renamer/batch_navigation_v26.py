@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 
@@ -50,6 +51,17 @@ FAST_OBSERVATION_DELAY_SECONDS = 0.6
 CHANGED_IDENTITY_CONFIRMATIONS = 3
 BASELINE_OBSERVATIONS = 5
 BASELINE_CONFIRMATIONS = 2
+
+
+def _persist_post_swipe_wait_enabled() -> bool:
+    """Keep the direct-detail batch alive while visual identity briefly drops."""
+
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _normalized(value: str) -> str:
@@ -265,6 +277,54 @@ def _observe_after_swipe(
     return same
 
 
+def _wait_for_post_swipe_identity(
+    proxy: SafeProxy,
+    previous: DetailFingerprint,
+) -> tuple[Snapshot, DetailFingerprint, bool, tuple[Snapshot, ...]] | None:
+    """Read only until a post-swipe detail can again be identified.
+
+    A game detail can remain visually present while OCR temporarily supplies
+    no usable text.  With the headless persistence switch enabled, do not
+    turn that read-side outage into a batch failure or issue another swipe.
+    The first re-proven old detail permits the normal bounded swipe sequence
+    to continue; a different detail still requires three distinct frames.
+    """
+
+    if not _persist_post_swipe_wait_enabled():
+        return None
+    emit_message = getattr(base, "emit", None)
+    # batch_navigation deliberately has no UI dependency.  The caller owns
+    # user-facing events; this marker is retained only for test-free local
+    # tracing when the base agent exposes its normal emitter.
+    if callable(emit_message):
+        emit_message(
+            "status",
+            message=(
+                "翻页后身份字段暂不可读；后台保持运行并只读等待详情页恢复，"
+                "不会重复滑动或结束任务。"
+            ),
+        )
+    blocked = _blocked_frame_hashes(proxy)
+    changed_samples: dict[DetailFingerprint, list[tuple[Snapshot, str]]] = {}
+    while True:
+        snapshot = base._next_snapshot(proxy, 3.0)
+        digest = _snapshot_digest(snapshot)
+        if not digest or digest in blocked:
+            continue
+        try:
+            current = detail_fingerprint(snapshot)
+        except PolicyViolation:
+            continue
+        if not fingerprints_differ(previous, current):
+            return snapshot, current, False, ()
+        samples = changed_samples.setdefault(current, [])
+        if digest in {sample_digest for _sample, sample_digest in samples}:
+            continue
+        samples.append((snapshot, digest))
+        if len(samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
+            return snapshot, current, True, tuple(sample for sample, _digest in samples)
+
+
 def swipe_to_verified_next(
     proxy: SafeProxy,
     detail: Snapshot,
@@ -286,6 +346,8 @@ def swipe_to_verified_next(
     for direction in directions:
         _swipe_next_once(proxy, direction=direction)
         observed = _observe_after_swipe(proxy, previous)
+        if observed is None:
+            observed = _wait_for_post_swipe_identity(proxy, previous)
         if observed is None:
             raise NoNextPokemon(
                 "横向翻页后连续只读采样仍无法确认安全详情页"
