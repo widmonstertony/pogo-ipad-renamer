@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from . import ipad_landscape_agent as base
 from . import ipad_landscape_agent_v13 as v13
@@ -46,6 +47,43 @@ class RenameFieldVerificationUnavailable(PolicyViolation):
         super().__init__("输入字段在有限只读重测后仍不可核验；已取消未提交内容")
         self.snapshot = snapshot
         self.actual = actual
+
+
+def _persistent_task_switcher_wait_enabled() -> bool:
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _task_switcher_overlay_active(proxy: SafeProxy) -> bool:
+    observation = proxy.observation
+    if observation is None:
+        return False
+    text = str(observation.text).casefold()
+    return "程序坞" in text or "dock" in text
+
+
+def _wait_for_task_switcher_to_clear(proxy: SafeProxy) -> bool:
+    """Read only until the iPad overview no longer masks the rename dialog."""
+
+    if not (
+        _persistent_task_switcher_wait_enabled()
+        and _task_switcher_overlay_active(proxy)
+    ):
+        return False
+    emit(
+        "status",
+        message=(
+            "iPad 多任务切换层覆盖改名界面；后台保持运行并只读等待，"
+            "不会点击 OK、取消或其他 App。"
+        ),
+    )
+    while _task_switcher_overlay_active(proxy):
+        base._next_snapshot(proxy, 3.0)
+    return True
 
 
 def _verified_entered_value_with_read_only_retry(
@@ -149,6 +187,28 @@ def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
             break
         proxy.pending_name = None
         raise RenameFieldVerificationUnavailable(detail, actual)
+
+    if (
+        _persistent_task_switcher_wait_enabled()
+        and _task_switcher_overlay_active(proxy)
+    ):
+        emit(
+            "status",
+            message=(
+                "取消未提交改名后被 iPad 多任务切换层覆盖；后台保持运行并只读等待详情恢复，"
+                "不会重新点击盒子卡片。"
+            ),
+        )
+        while True:
+            detail = base._next_snapshot(proxy, 3.0)
+            try:
+                base._validate_expected("DETAIL", detail)
+            except (PolicyViolation, ValueError):
+                if _task_switcher_overlay_active(proxy):
+                    continue
+                raise
+            proxy.pending_name = None
+            raise RenameFieldVerificationUnavailable(detail, actual)
 
     raise PolicyViolation(
         "取消未提交改名后连续只读等待仍未验证到详情页；未重新点击盒子卡片"
@@ -446,6 +506,14 @@ def _commit_after_dismissing_keyboard(
         },
     )
     entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
+    if entered_value != nickname:
+        # A task-switcher frame can expose another app's accessibility text
+        # (for example “账号安全”) while the unsubmitted Pokémon GO field is
+        # still underneath.  Wait for the overlay to clear before deciding
+        # whether cancellation is necessary; never tap either dialog button
+        # while that system layer is visible.
+        if _wait_for_task_switcher_to_clear(proxy):
+            entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
     if entered_value != nickname:
         emit(
             "status",

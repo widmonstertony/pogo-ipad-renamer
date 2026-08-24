@@ -14,6 +14,7 @@ from pogo_iphone_renamer.ipad_landscape_agent_v22 import (
     _submit_with_one_verified_retry,
     _tap_accessibility_cancel,
     _tap_accessibility_ok,
+    _wait_for_task_switcher_to_clear,
 )
 from pogo_iphone_renamer.policy import PolicyViolation
 
@@ -34,6 +35,28 @@ class _Proxy:
 
 
 class BatchVerifiedCommitTests(unittest.TestCase):
+    def test_task_switcher_waits_without_touching_rename_dialog(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(text="程序坞\n账号安全")
+        )
+
+        def clear_overlay(_proxy, _delay):
+            proxy.observation.text = "重新命名"
+            return Snapshot("rename dialog", "dialog")
+
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            side_effect=clear_overlay,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ) as emit:
+            _wait_for_task_switcher_to_clear(proxy)
+
+        next_snapshot.assert_called_once_with(proxy, 3.0)
+        emit.assert_called_once()
+
     def test_keyboard_dismiss_waits_through_one_empty_ocr_frame(self) -> None:
         blank = Snapshot("", "blank")
         dialog = Snapshot("", "dialog")
