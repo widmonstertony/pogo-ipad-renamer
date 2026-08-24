@@ -34,6 +34,22 @@ class IPadLandscapeAgentTests(unittest.TestCase):
         snapshot = Snapshot(text="CP713 95/95HP 31.22kg 1.26m", image=None)
         self.assertEqual(local_page_state(snapshot), "DETAIL")
 
+    def test_complete_pixel_rename_dialog_beats_map_fallback(self) -> None:
+        snapshot = Snapshot(text="unrelated desktop", image="rename-dialog")
+        lines = (
+            unittest.mock.Mock(text="設定暱稱", confidence=0.99),
+            unittest.mock.Mock(text="OK", confidence=0.99),
+            unittest.mock.Mock(text="取消", confidence=0.99),
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.measure_ipad14_6_appraisal",
+            side_effect=ValueError("not appraisal"),
+        ), patch(
+            "pogo_iphone_renamer.local_ocr.ocr_mcp_screenshot",
+            return_value=lines,
+        ):
+            self.assertEqual(local_page_state(snapshot), "RENAME_DIALOG")
+
     def test_appraisal_bars_are_never_accepted_as_plain_detail(self) -> None:
         snapshot = Snapshot(
             text="CP713 95/95HP 31.22kg 1.26m",

@@ -112,6 +112,7 @@ def local_page_state(snapshot: Snapshot) -> str:
         except ValueError:
             pass
     text = _normalized_text(snapshot)
+    local_lines = ()
     if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and snapshot.image:
         # MCP accessibility/OCR describes the whole Stage Manager desktop and
         # often omits the rotated game window.  Reuse the canonicalized local
@@ -120,13 +121,26 @@ def local_page_state(snapshot: Snapshot) -> str:
         try:
             from .local_ocr import ocr_mcp_screenshot
 
+            local_lines = ocr_mcp_screenshot(snapshot.image, ORIENTATION)
             local_text = "\n".join(
-                line.text
-                for line in ocr_mcp_screenshot(snapshot.image, ORIENTATION)
-                if line.confidence >= 0.45
+                line.text for line in local_lines if line.confidence >= 0.45
             )
             if local_text:
                 text = local_text.casefold()
+        except Exception:
+            pass
+    # A rotated iPad Stage Manager capture often omits the keyboard's
+    # accessibility labels (notably “清除文本”).  The complete trio is a
+    # stronger, pixel-local proof of the Pokémon GO rename dialog than the
+    # generic page classifier, which would otherwise fall through to MAP.
+    # Keep this ahead of all detail/menu heuristics so a delayed post-pencil
+    # dialog is resumed or cancelled safely instead of starting navigation.
+    if local_lines:
+        try:
+            from .local_ocr import rename_dialog_visible
+
+            if rename_dialog_visible(local_lines):
+                return "RENAME_DIALOG"
         except Exception:
             pass
     if "清除文本" in text and ("完成" in text or "取消" in text):

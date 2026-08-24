@@ -34,6 +34,7 @@ from .ipad_landscape_agent_v15 import (
 )
 from .ipad_landscape_agent_v22 import (
     RenameFieldVerificationUnavailable,
+    _cancel_unverified_input,
     _commit_after_dismissing_keyboard,
     _dialog_evidence_after_keyboard_dismiss,
     _submit_with_one_verified_retry,
@@ -45,6 +46,8 @@ from .ipad_landscape_agent_v24 import (
 )
 from .ipad_landscape_agent_v25 import _navigate_with_complete_stale_recovery
 from .landscape_cv_v6 import measure_ipad14_6_appraisal_v6
+from .local_ocr import exact_species_from_lines, ocr_mcp_screenshot, rename_dialog_visible
+from .local_ocr_v4 import locate_exact_text_from_mcp
 from .local_ocr_v3 import HP_LINE, NUMBER_TOKEN, NameRegionResult, analyze_name_region
 from .native_agent import emit
 from .native_agent_v2 import ResilientStreamableHTTPClient
@@ -417,6 +420,38 @@ def _last_unsubmitted_journal_nickname(settings: Settings) -> str | None:
     return candidate
 
 
+def _proven_default_name_in_rename_dialog(snapshot: Snapshot) -> str | None:
+    """Return a default species only when it is visibly in the dialog field.
+
+    A worker can be interrupted after it has opened the iOS dialog but before
+    it has typed anything.  That blank/default dialog is safe to cancel and
+    resume from; a custom or partially edited field is deliberately left
+    untouched.  The field-region test prevents a Pokémon name elsewhere in a
+    Stage Manager screenshot from authorizing a cancel.
+    """
+
+    if not snapshot.image:
+        return None
+    lines = ocr_mcp_screenshot(snapshot.image, base.ORIENTATION)
+    if not rename_dialog_visible(lines):
+        return None
+    try:
+        species, _confidence = exact_species_from_lines(lines)
+        located = locate_exact_text_from_mcp(
+            snapshot.image,
+            base.ORIENTATION,
+            species,
+            minimum_confidence=0.70,
+        )
+    except PolicyViolation:
+        return None
+    x_ratio = (located.box.left + located.box.right) / (2.0 * located.image_width)
+    y_ratio = located.box.center_y / located.image_height
+    if not (0.10 <= x_ratio <= 0.70 and 0.30 <= y_ratio <= 0.55):
+        return None
+    return species
+
+
 def _resume_verified_unsubmitted_rename(
     proxy: SafeProxy, snapshot: Snapshot, settings: Settings
 ) -> Snapshot:
@@ -432,7 +467,21 @@ def _resume_verified_unsubmitted_rename(
         return snapshot
     candidate = _last_unsubmitted_journal_nickname(settings)
     if not candidate:
-        raise PolicyViolation("检测到未留档的改名弹窗；不会猜测提交或取消")
+        default_name = _proven_default_name_in_rename_dialog(snapshot)
+        if default_name is None:
+            raise PolicyViolation("检测到未留档且无法证明默认名称的改名弹窗；不会猜测提交或取消")
+        emit(
+            "status",
+            message=(
+                f"检测到先前仅打开、尚未输入的默认名称弹窗：{default_name}；"
+                "自动取消后从同一详情页重试。"
+            ),
+        )
+        try:
+            _cancel_unverified_input(proxy, default_name)
+        except RenameFieldVerificationUnavailable as cancelled:
+            return cancelled.snapshot
+        raise PolicyViolation("默认名称弹窗取消流程未返回已验证详情页")
     actual = _verified_entered_value(proxy)
     if actual != candidate:
         raise PolicyViolation(

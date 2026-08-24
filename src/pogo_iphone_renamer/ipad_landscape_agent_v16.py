@@ -27,7 +27,11 @@ from .species_db import traditional_chinese_species
 # remain unchanged.
 _RENAME_DIALOG_INITIAL_READ_DELAY_SECONDS = 0.65
 _POST_PENCIL_READ_ONLY_RECHECKS = 4
-_CALIBRATED_PENCIL_DIALOG_RECHECKS = 12
+# The iPad's Stage Manager/MCP stack can acknowledge the pencil touch and
+# publish the actual dialog only tens of seconds later.  These are reads only;
+# keeping the same verified DETAIL frame avoids both a second touch and a
+# false terminal failure while the transition is still in flight.
+_CALIBRATED_PENCIL_DIALOG_RECHECKS = 54
 
 
 class RenamePencilLocalizationUnavailable(PolicyViolation):

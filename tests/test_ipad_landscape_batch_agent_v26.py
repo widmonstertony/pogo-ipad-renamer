@@ -33,6 +33,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
     _process_one,
+    _proven_default_name_in_rename_dialog,
     _resume_verified_unsubmitted_rename,
     _wait_for_direct_detail_after_task_switcher,
     _wait_for_verified_next_detail,
@@ -128,6 +129,55 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             self.assertEqual(proxy.verified_renames, 1)
             self.assertIsNone(proxy.pending_name)
             journal.append.assert_called_once()
+
+    def test_default_unsubmitted_dialog_is_cancelled_and_returns_detail(self) -> None:
+        settings = SimpleNamespace(journal_path=Path("/not-used"))
+        proxy = object()
+        dialog = Snapshot("rename", "dialog")
+        detail = Snapshot("detail", "detail")
+        cancelled = RenameFieldVerificationUnavailable(detail, "涼脊龍")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+            return_value="RENAME_DIALOG",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._last_unsubmitted_journal_nickname",
+            return_value=None,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._proven_default_name_in_rename_dialog",
+            return_value="涼脊龍",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._cancel_unverified_input",
+            side_effect=cancelled,
+        ) as cancel, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            returned = _resume_verified_unsubmitted_rename(proxy, dialog, settings)
+
+        self.assertIs(returned, detail)
+        cancel.assert_called_once_with(proxy, "涼脊龍")
+
+    def test_default_dialog_proof_requires_name_inside_input_field(self) -> None:
+        snapshot = Snapshot("rename", "dialog")
+        boxes = SimpleNamespace(
+            box=SimpleNamespace(left=150.0, right=310.0, center_y=570.0),
+            image_width=1024,
+            image_height=1366,
+        )
+        line = SimpleNamespace(text="涼脊龍", confidence=0.99)
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.ocr_mcp_screenshot",
+            return_value=(line,),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.rename_dialog_visible",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.exact_species_from_lines",
+            return_value=("涼脊龍", 0.99),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.locate_exact_text_from_mcp",
+            return_value=boxes,
+        ):
+            self.assertEqual(_proven_default_name_in_rename_dialog(snapshot), "涼脊龍")
 
     def test_task_switcher_waits_for_existing_direct_detail(self) -> None:
         overview = Snapshot("程序坞\n账号安全", "overview")
