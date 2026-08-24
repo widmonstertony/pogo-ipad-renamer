@@ -372,6 +372,31 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         close.assert_called_once_with(proxy)
         self.assertIn("遗留的鉴定层", emit.call_args.kwargs["message"])
 
+    def test_direct_resume_advances_a_proven_appraisal_dialogue_once(self) -> None:
+        dialogue = Snapshot("", "dialogue")
+        appraisal = Snapshot("", "appraisal")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = object()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+            return_value="APPRAISAL_DIALOG",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_read_only_measurement_retry",
+            return_value=(appraisal, object()),
+        ) as advance, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
+            return_value=detail,
+        ) as close, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            returned = _restore_direct_detail_after_interrupted_appraisal(
+                proxy, dialogue
+            )
+
+        self.assertIs(returned, detail)
+        advance.assert_called_once_with(proxy, dialogue)
+        close.assert_called_once_with(proxy)
+
     def test_detail_capture_wait_never_permits_game_restart(self) -> None:
         proxy = object()
         snapshot = Snapshot("detail", "frame")

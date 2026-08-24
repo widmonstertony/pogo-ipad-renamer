@@ -158,12 +158,22 @@ def local_page_state(snapshot: Snapshot) -> str:
                 return "RENAME_DIALOG"
         except Exception:
             pass
-    if "清除文本" in text and ("完成" in text or "取消" in text):
-        return "RENAME_DIALOG"
     has_visible_species = any(
         line.confidence >= 0.85 and line.text in traditional_chinese_species()
         for line in local_lines
     )
+    # The team-leader text sits above the still-visible detail page and does
+    # not include the red IV tracks yet.  Treat it as its own state so a
+    # resumed worker advances the dialogue exactly once instead of calling it
+    # MAP and trying to recover through unrelated navigation.
+    has_appraisal_dialogue = any(
+        phrase in text
+        for phrase in ("我們來看看", "我们来看看", "我跟你說", "我跟你说")
+    )
+    if has_visible_species and has_appraisal_dialogue:
+        return "APPRAISAL_DIALOG"
+    if "清除文本" in text and ("完成" in text or "取消" in text):
+        return "RENAME_DIALOG"
     if _detail_text_evidence(text, has_visible_species=has_visible_species):
         return "DETAIL"
     if re.search(r"\d{3,}\s*/\s*\d{3,}", text) and "hp" not in text:
@@ -185,6 +195,37 @@ def _tap(proxy: SafeProxy, key: str) -> None:
     observation = proxy.observation
     if observation is None or observation.width is None or observation.height is None:
         raise PolicyViolation("MCP 未返回屏幕边界")
+    # The detail-menu card can be vertically compressed by an adjacent iPad
+    # window.  Its calibrated coordinate is a useful fallback, but the menu
+    # already exposes one exact, harmless label for the only permitted action.
+    # Prefer that current-pixel proof so a compressed card never turns a tap
+    # into a click on a different menu row.
+    if key == "DETAIL_MENU" and ORIENTATION == "STAGE_MANAGER_MAXIMIZED":
+        from .rename_controls_v20 import tap_ocr_control
+
+        labels = (
+            "調查寶可夢",
+            "寶可夢鑑定",
+            "宝可梦鉴定",
+            "鑑定",
+            "鉴定",
+        )
+        last_error: PolicyViolation | None = None
+        for label in labels:
+            try:
+                tap_ocr_control(
+                    proxy,
+                    label,
+                    x_range=(0.55, 0.92),
+                    y_range=(0.62, 0.82),
+                    expected_after="APPRAISAL",
+                    intent="navigate exact OCR-verified Pokemon appraisal control",
+                )
+                return
+            except PolicyViolation as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
     x_ratio, y_ratio, label, expected = ANCHORS[key]
     if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and observation.width > observation.height:
         x, y = upright_ratio_to_touch(
@@ -364,6 +405,13 @@ def navigate_to_appraisal(proxy: SafeProxy, snapshot: Snapshot) -> tuple[Snapsho
     order = ["MAP", "MAIN_MENU", "INVENTORY", "DETAIL", "DETAIL_MENU"]
     if state == "APPRAISAL_BARS":
         assert snapshot.image
+        return snapshot, measure_ipad14_6_appraisal(snapshot.image, ORIENTATION)
+    if state == "APPRAISAL_DIALOG":
+        snapshot = _ensure_stage_geometry_for_state(proxy, snapshot, state)
+        _tap(proxy, "APPRAISAL_DIALOG")
+        snapshot = _next_snapshot(proxy)
+        if not snapshot.image:
+            raise ValueError("鉴定页截图缺失")
         return snapshot, measure_ipad14_6_appraisal(snapshot.image, ORIENTATION)
     if state not in order:
         raise PolicyViolation(f"横屏状态机不支持当前起点：{state}")

@@ -280,8 +280,21 @@ def _restore_direct_detail_after_interrupted_appraisal(
 ) -> Snapshot:
     """Close only a proven appraisal overlay before a direct-detail resume."""
 
-    if base.local_page_state(snapshot) != "APPRAISAL_BARS":
+    state = base.local_page_state(snapshot)
+    if state not in {"APPRAISAL_DIALOG", "APPRAISAL_BARS"}:
         return snapshot
+    if state == "APPRAISAL_DIALOG":
+        emit(
+            "status",
+            message=(
+                "检测到上次中断时遗留的鉴定对白；只推进该对白一次，"
+                "再关闭鉴定层回到同一只详情页。"
+            ),
+        )
+        appraisal, _measurement = _navigate_with_read_only_measurement_retry(
+            proxy, snapshot
+        )
+        return _close_appraisal(proxy)
     emit(
         "status",
         message=(
@@ -870,6 +883,11 @@ def _ensure_plain_detail(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
 
     state = v14.robust_page_state(snapshot)
     if state == "APPRAISAL_BARS":
+        return _close_appraisal(proxy)
+    if state == "APPRAISAL_DIALOG":
+        appraisal, _measurement = _navigate_with_read_only_measurement_retry(
+            proxy, snapshot
+        )
         return _close_appraisal(proxy)
     if state == "DETAIL":
         base._validate_expected("DETAIL", snapshot)

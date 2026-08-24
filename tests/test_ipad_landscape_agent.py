@@ -68,6 +68,39 @@ class IPadLandscapeAgentTests(unittest.TestCase):
         ):
             self.assertEqual(local_page_state(snapshot), "DETAIL")
 
+    def test_team_leader_dialogue_is_not_mislabeled_as_map(self) -> None:
+        snapshot = Snapshot(text="desktop", image="appraisal-dialog")
+        lines = (
+            unittest.mock.Mock(text="光蚪仔", confidence=0.99),
+            unittest.mock.Mock(
+                text="你好！我們來看看你的光蚪仔吧！", confidence=0.99
+            ),
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.measure_ipad14_6_appraisal",
+            side_effect=ValueError("not bars yet"),
+        ), patch(
+            "pogo_iphone_renamer.local_ocr.ocr_mcp_screenshot",
+            return_value=lines,
+        ):
+            self.assertEqual(local_page_state(snapshot), "APPRAISAL_DIALOG")
+
+    def test_detail_menu_prefers_exact_ocr_appraisal_control(self) -> None:
+        from types import SimpleNamespace
+
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(width=1366, height=1024, token="fresh")
+        )
+        with patch(
+            "pogo_iphone_renamer.rename_controls_v20.tap_ocr_control"
+        ) as tap_exact:
+            from pogo_iphone_renamer import ipad_landscape_agent as base
+
+            base._tap(proxy, "DETAIL_MENU")
+
+        tap_exact.assert_called_once()
+        self.assertEqual(tap_exact.call_args.args[1], "調查寶可夢")
+
     def test_appraisal_bars_are_never_accepted_as_plain_detail(self) -> None:
         snapshot = Snapshot(
             text="CP713 95/95HP 31.22kg 1.26m",
