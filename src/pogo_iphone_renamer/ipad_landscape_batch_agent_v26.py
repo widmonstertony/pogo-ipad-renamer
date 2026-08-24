@@ -102,6 +102,29 @@ def _remember_fresh_frames(proxy: SafeProxy, digests: list[str]) -> None:
         del history[:-_FRESH_FRAME_HISTORY_LIMIT]
 
 
+def _post_rename_navigation_fallback(snapshot: Snapshot) -> DetailFingerprint | None:
+    """Keep only immutable detail fields for a just-verified rename.
+
+    This snapshot precedes all appraisal and rename writes.  The helper is
+    deliberately name-free: configured nicknames can truncate a species title,
+    and that title must never be guessed after the write.  The returned values
+    are used only to prove that a later swipe changed detail pages.
+    """
+
+    try:
+        fingerprint = detail_fingerprint(snapshot)
+    except PolicyViolation:
+        return None
+    fallback = DetailFingerprint(
+        (),
+        fingerprint.cp,
+        fingerprint.hp,
+        fingerprint.weight,
+        fingerprint.height,
+    )
+    return fallback if any(fallback.stable_fields()[1:]) else None
+
+
 def _detail_name_key(result: NameRegionResult) -> tuple[str, str]:
     if result.is_default and result.species:
         return "default", result.species
@@ -1293,6 +1316,12 @@ def run(mode: str, settings: Settings) -> int:
                     # can never be reused after a pause, retry, or restart.
                     seed_samples = identity_seed_samples
                     identity_seed_samples = ()
+                    # This pre-write snapshot is already the current verified
+                    # detail.  It is passed on only after a later rename was
+                    # fully committed and character-for-character checked.
+                    pre_rename_navigation_fallback = _post_rename_navigation_fallback(
+                        snapshot
+                    )
                     detail, outcome = _process_one(
                         proxy,
                         snapshot,
@@ -1302,7 +1331,13 @@ def run(mode: str, settings: Settings) -> int:
                         identity_seed_samples=seed_samples,
                     )
                     detail, fingerprint = wait_for_stable_detail_fingerprint(
-                        proxy, detail
+                        proxy,
+                        detail,
+                        verified_rename_fallback=(
+                            pre_rename_navigation_fallback
+                            if outcome == "renamed"
+                            else None
+                        ),
                     )
                     _remember_fresh_frames(proxy, [_snapshot_digest(detail)])
                 except (PolicyViolation, ValueError) as exc:

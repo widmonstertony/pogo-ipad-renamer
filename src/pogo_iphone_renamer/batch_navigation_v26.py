@@ -162,7 +162,10 @@ def fingerprints_differ(before: DetailFingerprint, after: DetailFingerprint) -> 
 
 
 def wait_for_stable_detail_fingerprint(
-    proxy: SafeProxy, snapshot: Snapshot
+    proxy: SafeProxy,
+    snapshot: Snapshot,
+    *,
+    verified_rename_fallback: DetailFingerprint | None = None,
 ) -> tuple[Snapshot, DetailFingerprint]:
     """Read only until a known detail regains enough fields for navigation.
 
@@ -171,11 +174,38 @@ def wait_for_stable_detail_fingerprint(
     loses its CP/HP/size text.  In persistent direct-detail mode we keep that
     same page untouched and wait; an overlay or any other unsafe page still
     raises immediately.
+
+    A just-verified rename can shorten the configured nickname so much that
+    OCR cannot recover the complete species title from the detail header.  In
+    that one case, the caller may pass a name-free fingerprint made from the
+    same Pokemon's *pre-rename*, fully verified detail frame.  Its immutable
+    CP/HP/weight/height fields are enough to prove the following swipe reached
+    a different detail, while the fallback never authorizes a rename itself.
     """
 
     try:
         return snapshot, detail_fingerprint(snapshot)
     except PolicyViolation as initial_error:
+        if (
+            verified_rename_fallback is not None
+            and "详情页稳定身份字段不足" in str(initial_error)
+            and any(
+                (
+                    verified_rename_fallback.cp,
+                    verified_rename_fallback.hp,
+                    verified_rename_fallback.weight,
+                    verified_rename_fallback.height,
+                )
+            )
+        ):
+            base.emit(
+                "status",
+                message=(
+                    "改名已逐字核验；新昵称过短，无法从标题 OCR 恢复完整物种名。"
+                    "本次仅使用改名前已确认的 CP/HP/体型字段验证下一次翻页。"
+                ),
+            )
+            return snapshot, verified_rename_fallback
         if (
             not _persist_post_swipe_wait_enabled()
             or "详情页稳定身份字段不足" not in str(initial_error)

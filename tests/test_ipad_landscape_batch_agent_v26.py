@@ -33,6 +33,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
     _process_one,
+    _post_rename_navigation_fallback,
     _proven_default_name_in_rename_dialog,
     _resume_verified_unsubmitted_rename,
     _wait_for_direct_detail_after_task_switcher,
@@ -56,6 +57,23 @@ def _default_name(species: str = "可達鴨") -> NameRegionResult:
 
 
 class BatchUnreadableAppraisalTests(unittest.TestCase):
+    def test_post_rename_navigation_fallback_removes_nickname(self) -> None:
+        before = DetailFingerprint(
+            ("迷你芙",), "cp415", "96/96hp", "11.02kg", "0.57m"
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.detail_fingerprint",
+            return_value=before,
+        ):
+            fallback = _post_rename_navigation_fallback(
+                Snapshot("before", "before-image")
+            )
+
+        self.assertEqual(
+            fallback,
+            DetailFingerprint((), "cp415", "96/96hp", "11.02kg", "0.57m"),
+        )
+
     def test_journal_only_returns_latest_uncommitted_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "actions.jsonl"

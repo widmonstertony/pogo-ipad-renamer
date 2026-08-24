@@ -248,6 +248,30 @@ class DetailFingerprintTests(unittest.TestCase):
         next_snapshot.assert_called_once_with(unittest.mock.ANY, 3.0)
         emit.assert_called_once()
 
+    def test_verified_rename_uses_pre_rename_immutable_fallback(self) -> None:
+        fallback = DetailFingerprint(
+            (), "cp500", "60/60hp", "6.0kg", "0.4m"
+        )
+        short_nickname_detail = Snapshot("", "short-nickname-detail")
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
+            side_effect=PolicyViolation("详情页稳定身份字段不足；不会自动翻页"),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base._next_snapshot"
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.batch_navigation_v26.base.emit"
+        ) as emit:
+            snapshot, returned = wait_for_stable_detail_fingerprint(
+                object(),
+                short_nickname_detail,
+                verified_rename_fallback=fallback,
+            )
+
+        self.assertIs(snapshot, short_nickname_detail)
+        self.assertEqual(returned, fallback)
+        next_snapshot.assert_not_called()
+        emit.assert_called_once()
+
     def test_persistent_baseline_waits_for_a_second_matching_identity(self) -> None:
         initial = DetailFingerprint(
             ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
