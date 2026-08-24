@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from . import ipad_landscape_agent as base
@@ -137,6 +138,54 @@ def _tap_dynamic_pencil_at(proxy: SafeProxy, x: float, y: float) -> None:
     )
 
 
+def _require_visual_detail(snapshot: Snapshot) -> None:
+    """Require the local game crop, never surrounding AX text, to show DETAIL.
+
+    In the iPad Stage Manager layout, accessibility can temporarily describe
+    unrelated window chrome while the screenshot crop has already proved the
+    active Pokémon detail.  The generic ``_validate_expected`` path was
+    designed for the inventory card transition and therefore reports its
+    misleading “first card” error for that condition.  Dynamic-pencil work is
+    already bound to one verified detail; use the calibrated local classifier
+    that sees the same pixels used to locate the name row.
+    """
+
+    if base.local_page_state(snapshot) != "DETAIL":
+        raise PolicyViolation("详情页局部像素证明暂不可用；不会定位或点击名称铅笔")
+
+
+def _task_switcher_thumbnail_visible(proxy: SafeProxy, snapshot: Snapshot) -> bool:
+    """Detect a shrunken Pokémon GO card, not a live game window.
+
+    iPad's app switcher leaves a visually convincing detail page inside the
+    Pokémon GO thumbnail.  Pixel OCR can still read that card, but taps are
+    not delivered to the game.  A thumbnail is materially narrower and lower
+    than the maximized Stage Manager game surface on the calibrated device.
+    """
+
+    if not snapshot.image:
+        return False
+    try:
+        base._remember_stage_geometry(proxy, snapshot)
+        geometry = base.current_stage_geometry(proxy)
+    except PolicyViolation:
+        return False
+    return (
+        geometry.raw_width < geometry.raw_height
+        and geometry.width / geometry.raw_width <= 0.60
+        and geometry.top / geometry.raw_height >= 0.10
+    )
+
+
+def _persistent_capture_wait_enabled() -> bool:
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _locate_dynamic_pencil_with_read_only_retry(
     proxy: SafeProxy,
     detail: Snapshot,
@@ -144,12 +193,18 @@ def _locate_dynamic_pencil_with_read_only_retry(
     *,
     extra_gap: float,
     attempts: int = 3,
+    detail_already_verified: bool = False,
 ) -> tuple[Snapshot, tuple[float, float]]:
     """Locate the pencil from fresh screenshots without performing a tap."""
 
     last_error: PolicyViolation | None = None
     for attempt in range(1, attempts + 1):
-        base._validate_expected("DETAIL", detail)
+        # A post-pencil detail was just proved by
+        # _wait_for_dialog_or_detail_after_pencil.  Re-running a broader AX
+        # validation on that identical image is both redundant and vulnerable
+        # to Stage Manager's stale surrounding accessibility tree.
+        if not (detail_already_verified and attempt == 1):
+            _require_visual_detail(detail)
         try:
             point = _dynamic_pencil_coordinates(
                 proxy, detail, current_name, extra_gap=extra_gap
@@ -172,6 +227,7 @@ def _locate_dynamic_pencil_with_read_only_retry(
                 ),
             )
             detail = base._next_snapshot(proxy, 0.6)
+            detail_already_verified = False
 
     assert last_error is not None
     raise RenamePencilLocalizationUnavailable(detail, last_error) from last_error
@@ -215,10 +271,28 @@ def _wait_for_dialog_or_detail_after_pencil(
     """
 
     candidate = snapshot
+    task_switcher_reported = False
     for attempt in range(1, _POST_PENCIL_READ_ONLY_RECHECKS + 1):
         verified = _verified_dialog_snapshot(proxy, current_name)
         if verified is not None:
             return verified
+        if _task_switcher_thumbnail_visible(proxy, candidate):
+            if not _persistent_capture_wait_enabled():
+                return None
+            if not task_switcher_reported:
+                emit(
+                    "status",
+                    message=(
+                        "iPad 多任务切换层覆盖同一只宝可梦的改名窗口；"
+                        "后台保持运行并只读等待，不会在缩略卡片上点击铅笔或 OK。"
+                    ),
+                )
+                task_switcher_reported = True
+            while _task_switcher_thumbnail_visible(proxy, candidate):
+                candidate = base._next_snapshot(proxy, 3.0)
+            # The recovered foreground frame is still read-only evidence; a
+            # delayed dialog wins before this function can consider a retry.
+            continue
         if base.local_page_state(candidate) == "DETAIL":
             return candidate
         if attempt < _POST_PENCIL_READ_ONLY_RECHECKS:
@@ -236,10 +310,14 @@ def _wait_for_dialog_or_detail_after_pencil(
 def open_dynamic_rename_from_detail(
     proxy: SafeProxy, detail: Snapshot, current_name: str
 ) -> Snapshot:
-    base._validate_expected("DETAIL", detail)
+    _require_visual_detail(detail)
     for attempt, gap in enumerate((33.0, 45.0), start=1):
         detail, (x, y) = _locate_dynamic_pencil_with_read_only_retry(
-            proxy, detail, current_name, extra_gap=gap
+            proxy,
+            detail,
+            current_name,
+            extra_gap=gap,
+            detail_already_verified=True,
         )
         _tap_dynamic_pencil_at(proxy, x, y)
         resolved = _wait_for_dialog_or_detail_after_pencil(

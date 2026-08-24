@@ -8,6 +8,7 @@ from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.ipad_landscape_agent_v16 import (
     RenamePencilLocalizationUnavailable,
     _locate_dynamic_pencil_with_read_only_retry,
+    _require_visual_detail,
     _wait_for_dialog_or_detail_after_pencil,
     dynamic_pencil_point,
 )
@@ -76,7 +77,7 @@ class DynamicPencilTests(unittest.TestCase):
         second = Snapshot("detail", "second")
         point = (615.0, 705.0)
         with patch(
-            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._validate_expected"
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v16._dynamic_pencil_coordinates",
             side_effect=[PolicyViolation("empty OCR"), point],
@@ -102,7 +103,7 @@ class DynamicPencilTests(unittest.TestCase):
         )
         snapshots = [Snapshot("detail", "second"), Snapshot("detail", "third")]
         with patch(
-            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._validate_expected"
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v16._dynamic_pencil_coordinates",
             side_effect=PolicyViolation("empty OCR"),
@@ -119,6 +120,33 @@ class DynamicPencilTests(unittest.TestCase):
 
         self.assertIs(raised.exception.snapshot, snapshots[-1])
         self.assertEqual(refresh.call_count, 2)
+
+    def test_post_pencil_proof_does_not_rerun_generic_inventory_validation(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(width=1024, height=1366, token="fresh")
+        )
+        detail = Snapshot("same-proven-detail", "detail")
+        point = (615.0, 705.0)
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._validate_expected",
+            side_effect=PolicyViolation("点击第一张卡片后没有验证到详情页"),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
+        ) as require_detail, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._dynamic_pencil_coordinates",
+            return_value=point,
+        ):
+            returned, coordinates = _locate_dynamic_pencil_with_read_only_retry(
+                proxy,
+                detail,
+                "涼脊龍",
+                extra_gap=45.0,
+                detail_already_verified=True,
+            )
+
+        self.assertIs(returned, detail)
+        self.assertEqual(coordinates, point)
+        require_detail.assert_not_called()
 
     def test_post_pencil_map_frame_waits_for_same_detail_without_a_second_tap(self) -> None:
         first = Snapshot("map-looking", "first")
