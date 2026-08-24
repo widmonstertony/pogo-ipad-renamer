@@ -305,12 +305,23 @@ def _remember_stage_geometry(proxy: SafeProxy, snapshot: Snapshot) -> None:
     if ORIENTATION != "STAGE_MANAGER_MAXIMIZED" or not snapshot.image:
         return
     existing = getattr(proxy, "_stage_manager_geometry", None)
-    set_preferred_stage_manager_geometry(
-        existing if isinstance(existing, StageManagerGeometry) else None
-    )
+    # A Stage Manager card can move or become partially covered between two
+    # otherwise valid Pokémon detail screenshots.  Never feed the previous
+    # geometry back into the detector here: the context cache would then
+    # return it immediately and every later OCR crop/touch would stay pinned
+    # to the old card position.  Fresh-frame detection is read-only.
+    set_preferred_stage_manager_geometry(None)
     try:
-        geometry = stage_manager_geometry_from_base64(snapshot.image)
+        geometry = stage_manager_geometry_from_base64(
+            snapshot.image, use_preferred=False
+        )
     except (OSError, ValueError) as exc:
+        # A transient featureless frame cannot establish a new layout.  Keep
+        # the last independently detected window only for reads; the next
+        # fresh frame will attempt calibration again before any touch.
+        if isinstance(existing, StageManagerGeometry):
+            set_preferred_stage_manager_geometry(existing)
+            return
         try:
             setattr(proxy, "_stage_manager_geometry", None)
             setattr(proxy, "_stage_manager_geometry_error", str(exc))

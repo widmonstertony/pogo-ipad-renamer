@@ -152,6 +152,26 @@ class StageManagerMappingTests(unittest.TestCase):
         draw.rectangle((370, 28, 914, 1334), fill=(230, 230, 230))
         self.assertEqual(stage_manager_geometry(distractor), locked)
 
+    def test_fresh_snapshot_recalibrates_when_stage_manager_card_moves(self) -> None:
+        def snapshot_for(left: int, right: int) -> Snapshot:
+            image = Image.new("RGB", (1024, 1366), (32, 78, 112))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((20, 28, 1004, 155), fill=(225, 225, 225))
+            draw.rectangle((left, 198, right, 1334), fill=(85, 180, 112))
+            draw.line((left, 198, left, 1334), fill=(250, 250, 250), width=3)
+            draw.line((right, 198, right, 1334), fill=(5, 5, 5), width=3)
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            return Snapshot("", base64.b64encode(output.getvalue()).decode("ascii"))
+
+        proxy = SimpleNamespace()
+        base._remember_stage_geometry(proxy, snapshot_for(106, 592))
+        base._remember_stage_geometry(proxy, snapshot_for(272, 750))
+
+        geometry = getattr(proxy, "_stage_manager_geometry")
+        self.assertAlmostEqual(geometry.left, 272, delta=5)
+        self.assertAlmostEqual(geometry.right, 750, delta=5)
+
     def test_detail_validation_uses_canonical_game_ocr_not_desktop_text(self) -> None:
         snapshot = Snapshot(text="Stage Manager desktop", image="game-screenshot")
         lines = [

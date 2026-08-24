@@ -269,9 +269,11 @@ def _fixed_stage_manager_geometry(image: Image.Image) -> StageManagerGeometry:
     )
 
 
-def stage_manager_geometry_from_base64(image_base64: str) -> StageManagerGeometry:
+def stage_manager_geometry_from_base64(
+    image_base64: str, *, use_preferred: bool = True
+) -> StageManagerGeometry:
     image = Image.open(io.BytesIO(base64.b64decode(image_base64))).convert("RGB")
-    return stage_manager_geometry(image)
+    return stage_manager_geometry(image, use_preferred=use_preferred)
 
 
 def stage_manager_upright_ratio_to_touch(
