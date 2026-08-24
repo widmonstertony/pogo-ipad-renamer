@@ -27,6 +27,7 @@ from .species_db import traditional_chinese_species
 # remain unchanged.
 _RENAME_DIALOG_INITIAL_READ_DELAY_SECONDS = 0.65
 _POST_PENCIL_READ_ONLY_RECHECKS = 4
+_CALIBRATED_PENCIL_DIALOG_RECHECKS = 12
 
 
 class RenamePencilLocalizationUnavailable(PolicyViolation):
@@ -257,7 +258,11 @@ def _verified_dialog_snapshot(
 
 
 def _wait_for_dialog_or_detail_after_pencil(
-    proxy: SafeProxy, current_name: str, snapshot: Snapshot
+    proxy: SafeProxy,
+    current_name: str,
+    snapshot: Snapshot,
+    *,
+    detail_stability_rechecks: int = 1,
 ) -> Snapshot | None:
     """Resolve a post-pencil transition without issuing another tap.
 
@@ -269,13 +274,21 @@ def _wait_for_dialog_or_detail_after_pencil(
     """
 
     candidate = snapshot
-    for attempt in range(1, _POST_PENCIL_READ_ONLY_RECHECKS + 1):
+    checks = max(_POST_PENCIL_READ_ONLY_RECHECKS, detail_stability_rechecks)
+    for attempt in range(1, checks + 1):
         verified = _verified_dialog_snapshot(proxy, current_name)
         if verified is not None:
             return verified
         if base.local_page_state(candidate) == "DETAIL":
-            return candidate
-        if attempt < _POST_PENCIL_READ_ONLY_RECHECKS:
+            if attempt >= detail_stability_rechecks:
+                return candidate
+            emit(
+                "status",
+                message=(
+                    f"铅笔点击后详情仍在；正在只读等待改名弹框完成（第 {attempt} 次复核）。"
+                ),
+            )
+        if attempt < checks:
             emit(
                 "status",
                 message=(
@@ -342,6 +355,7 @@ def open_dynamic_rename_from_detail(
         proxy,
         current_name,
         base._next_snapshot(proxy, 0.4),
+        detail_stability_rechecks=_CALIBRATED_PENCIL_DIALOG_RECHECKS,
     )
     if resolved is not None and base.local_page_state(resolved) == "RENAME_DIALOG":
         emit(

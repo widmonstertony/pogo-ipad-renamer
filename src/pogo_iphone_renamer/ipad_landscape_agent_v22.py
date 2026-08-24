@@ -21,6 +21,7 @@ from .keyboard_control_v22 import (
     exact_accessibility_tap_point,
 )
 from .local_ocr import ocr_mcp_screenshot, rename_dialog_visible
+from .local_ocr_v4 import locate_exact_text_from_mcp
 from .native_agent import emit
 from .policy import PolicyViolation, normalize_text
 from .rename_controls_v20 import tap_ok
@@ -47,6 +48,70 @@ class RenameFieldVerificationUnavailable(PolicyViolation):
         super().__init__("输入字段在有限只读重测后仍不可核验；已取消未提交内容")
         self.snapshot = snapshot
         self.actual = actual
+
+
+def _focus_ocr_default_name_field(proxy: SafeProxy, current_name: str) -> None:
+    """Focus the exact field from the current dialog pixels before clearing.
+
+    A visible iPad rename dialog does not guarantee the keyboard target is
+    active.  In that state MCP can acknowledge ``input_text`` while the field
+    remains unchanged.  The already-proven default name is the only OCR text
+    we use as a focus target; no fixed dialog point or inferred string is used.
+    """
+
+    dialog = base._next_snapshot(proxy, 0.2)
+    if not dialog.image or not rename_dialog_visible(
+        ocr_mcp_screenshot(dialog.image, base.ORIENTATION)
+    ):
+        raise PolicyViolation("改名弹窗未在聚焦名称字段前得到像素验证；未输入文字")
+    observation = proxy.observation
+    if observation is None or observation.width is None or observation.height is None:
+        raise PolicyViolation("聚焦名称字段时缺少安全观察")
+    base._remember_stage_geometry(proxy, dialog)
+    located = locate_exact_text_from_mcp(
+        dialog.image,
+        base.ORIENTATION,
+        current_name,
+        minimum_confidence=0.70,
+    )
+    x_ratio = (located.box.left + located.box.right) / (2.0 * located.image_width)
+    y_ratio = located.box.center_y / located.image_height
+    if not (0.10 <= x_ratio <= 0.70 and 0.30 <= y_ratio <= 0.55):
+        raise PolicyViolation("OCR 默认名称不在改名字段安全区域；未输入文字")
+    x, y = base.upright_ratio_to_touch(
+        observation.width,
+        observation.height,
+        x_ratio,
+        y_ratio,
+        geometry=base.current_stage_geometry(proxy),
+    )
+    proxy.call_tool(
+        "tap_screen",
+        {
+            "x": x,
+            "y": y,
+            "_observation_token": observation.token,
+            "_intent": "navigate OCR-verified default name field before clearing and rename input",
+            "_expected_after": "rename text field focused",
+        },
+    )
+
+
+def _dialog_contains_exact_text(proxy: SafeProxy, text: str) -> bool:
+    """Read a live dialog and preserve visual proof for a possible text write."""
+
+    dialog = base._next_snapshot(proxy, 0.3)
+    if not dialog.image or not rename_dialog_visible(
+        ocr_mcp_screenshot(dialog.image, base.ORIENTATION)
+    ):
+        return False
+    visible = any(
+        line.text == text and line.confidence >= 0.65
+        for line in ocr_mcp_screenshot(dialog.image, base.ORIENTATION)
+    )
+    if visible and proxy.observation is not None:
+        proxy.observation.text += "\n重新命名（离线 OCR 已验证当前改名弹窗）"
+    return visible
 
 
 def _persistent_task_switcher_wait_enabled() -> bool:
@@ -102,6 +167,13 @@ def _verified_entered_value_with_read_only_retry(
                     message=f"输入字段在第 {attempt} 次只读复核时恢复并逐字一致。",
                 )
             return last
+        if _dialog_contains_exact_text(proxy, nickname):
+            if attempt > 1:
+                emit(
+                    "status",
+                    message=f"输入字段在第 {attempt} 次视觉复核时恢复并逐字一致。",
+                )
+            return nickname
         if attempt < _FIELD_READ_RETRY_LIMIT:
             emit(
                 "status",
@@ -488,7 +560,14 @@ def _commit_after_dismissing_keyboard(
     nickname: str,
 ) -> Snapshot:
     verified_before = proxy.verified_renames
+    _focus_ocr_default_name_field(proxy, current_name)
     count = _backspace_current_name(proxy, current_name)
+    if _dialog_contains_exact_text(proxy, current_name):
+        emit(
+            "status",
+            message="名称字段在清空后仍完整显示原名；不会输入或提交，正在取消本次编辑。",
+        )
+        _cancel_unverified_input(proxy, current_name)
     _mark_rename_observation(proxy, f"已发送与精确原名等长的 {count} 次退格")
     emit("status", message=f"已清除原名称的 {count} 个字符；正在输入并逐字核验目标昵称。")
 
@@ -507,12 +586,31 @@ def _commit_after_dismissing_keyboard(
     )
     entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
     if entered_value != nickname:
+        # ``input_text`` may report transport success while a Stage Manager
+        # dialog kept the default value unchanged.  The MCP contract permits
+        # exactly one ``type_text`` fallback in that case, never after a
+        # partial/unknown field value.
+        if _dialog_contains_exact_text(proxy, current_name):
+            assert proxy.observation is not None
+            proxy.call_tool(
+                "type_text",
+                {
+                    "text": nickname,
+                    "_observation_token": proxy.observation.token,
+                    "_intent": "rename exact default species using deterministic pixel IV nickname fallback",
+                    "_expected_after": "rename field contains exact deterministic nickname",
+                    "_current_name": current_name,
+                    "_species": species,
+                    "_default_name_verified": True,
+                },
+            )
+            entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
         # A task-switcher frame can expose another app's accessibility text
         # (for example “账号安全”) while the unsubmitted Pokémon GO field is
         # still underneath.  Wait for the overlay to clear before deciding
         # whether cancellation is necessary; never tap either dialog button
         # while that system layer is visible.
-        if _wait_for_task_switcher_to_clear(proxy):
+        if entered_value != nickname and _wait_for_task_switcher_to_clear(proxy):
             entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
     if entered_value != nickname:
         emit(

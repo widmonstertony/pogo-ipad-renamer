@@ -221,6 +221,32 @@ class DynamicPencilTests(unittest.TestCase):
         next_snapshot.assert_called_once_with(unittest.mock.ANY, 0.8)
         self.assertIn("只读等待", emit.call_args.kwargs["message"])
 
+    def test_calibrated_pencil_waits_through_detail_frames_for_delayed_dialog(self) -> None:
+        first = Snapshot("detail", "first")
+        second = Snapshot("detail", "second")
+        verified_dialog = Snapshot("rename", "dialog")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._verified_dialog_snapshot",
+            side_effect=[None, None, verified_dialog],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.local_page_state",
+            return_value="DETAIL",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._next_snapshot",
+            side_effect=[second, second],
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.emit"
+        ):
+            returned = _wait_for_dialog_or_detail_after_pencil(
+                object(),
+                "涼脊龍",
+                first,
+                detail_stability_rechecks=3,
+            )
+
+        self.assertIs(returned, verified_dialog)
+        self.assertEqual(next_snapshot.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

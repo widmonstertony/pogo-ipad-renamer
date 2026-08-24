@@ -169,6 +169,11 @@ class BatchVerifiedCommitTests(unittest.TestCase):
 
         proxy = SubmitProxy(verified=0, pending=None)
         with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._focus_ocr_default_name_field"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._dialog_contains_exact_text",
+            return_value=False,
+        ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v22._backspace_current_name",
             return_value=4,
         ), patch(
@@ -297,6 +302,11 @@ class BatchVerifiedCommitTests(unittest.TestCase):
 
         proxy = RecoveryProxy(verified=0, pending=None)
         with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._focus_ocr_default_name_field"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._dialog_contains_exact_text",
+            return_value=False,
+        ), patch(
             "pogo_iphone_renamer.ipad_landscape_agent_v22._backspace_current_name",
             return_value=4,
         ), patch(
@@ -340,6 +350,83 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         validate.assert_called_once_with("DETAIL", detail)
         self.assertIsNone(proxy.pending_name)
         self.assertEqual(proxy.verified_renames, 0)
+
+    def test_unchanged_default_after_input_uses_one_type_text_fallback(self) -> None:
+        nickname = "滑滑小子❻❷⓬⁴⁴"
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(token="token", text="重新命名"),
+            verified_renames=0,
+            pending_name=None,
+            journal=_Journal(),
+            call_tool=Mock(),
+        )
+        detail = Snapshot("detail", "detail")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._focus_ocr_default_name_field"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._backspace_current_name",
+            return_value=4,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._dialog_contains_exact_text",
+            side_effect=[False, True],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._mark_rename_observation"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._verified_entered_value_with_read_only_retry",
+            side_effect=["", nickname],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.dismiss_active_keyboard",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._submit_with_one_verified_retry",
+            return_value=detail,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._finalize_verified_commit"
+        ), patch("pogo_iphone_renamer.ipad_landscape_agent_v22.emit"):
+            returned = _commit_after_dismissing_keyboard(
+                proxy,
+                current_name="滑滑小子",
+                species="滑滑小子",
+                nickname=nickname,
+            )
+
+        self.assertIs(returned, detail)
+        self.assertEqual(
+            [call.args[0] for call in proxy.call_tool.call_args_list],
+            ["input_text", "type_text"],
+        )
+
+    def test_default_still_visible_after_clear_never_sends_text(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(token="token", text="重新命名"),
+            verified_renames=0,
+            pending_name=None,
+            journal=_Journal(),
+            call_tool=Mock(),
+        )
+        cancelled = RenameFieldVerificationUnavailable(Snapshot("detail", "detail"), "滑滑小子")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._focus_ocr_default_name_field"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._backspace_current_name",
+            return_value=4,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._dialog_contains_exact_text",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._cancel_unverified_input",
+            side_effect=cancelled,
+        ) as cancel, patch("pogo_iphone_renamer.ipad_landscape_agent_v22.emit"):
+            with self.assertRaises(RenameFieldVerificationUnavailable):
+                _commit_after_dismissing_keyboard(
+                    proxy,
+                    current_name="滑滑小子",
+                    species="滑滑小子",
+                    nickname="滑滑小子❻❷⓬⁴⁴",
+                )
+
+        cancel.assert_called_once_with(proxy, "滑滑小子")
+        proxy.call_tool.assert_not_called()
 
     def test_cancel_waits_through_transient_non_detail_frame(self) -> None:
         dialog = Snapshot("rename dialog", "dialog")
