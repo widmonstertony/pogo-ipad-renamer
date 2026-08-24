@@ -85,6 +85,30 @@ class DynamicPencilTests(unittest.TestCase):
         remember.assert_called_once_with(proxy, detail)
         self.assertEqual(map_point.call_args.args[:4], (1366, 1024, 0.6006, 0.5081))
 
+    def test_static_pencil_reuses_a_freshly_verified_detail_frame(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(width=1366, height=1024, token="fresh")
+        )
+        detail = Snapshot("detail", "post-tap-detail")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
+        ) as require_detail, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._remember_stage_geometry"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.current_stage_geometry",
+            return_value=object(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.upright_ratio_to_touch",
+            return_value=(753.0, 723.0),
+        ):
+            _static_pencil_coordinates(
+                proxy,
+                detail,
+                detail_already_verified=True,
+            )
+
+        require_detail.assert_not_called()
+
     def test_rejects_text_outside_name_row(self) -> None:
         located = LocatedText(
             OCRTextBox("鯉魚王", 0.99, 577, 50, 787, 90), 1366, 1024

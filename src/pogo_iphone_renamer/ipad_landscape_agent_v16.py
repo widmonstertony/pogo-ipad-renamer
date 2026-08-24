@@ -121,7 +121,12 @@ def _dynamic_pencil_coordinates(
     )
 
 
-def _static_pencil_coordinates(proxy: SafeProxy, detail: Snapshot) -> tuple[float, float]:
+def _static_pencil_coordinates(
+    proxy: SafeProxy,
+    detail: Snapshot,
+    *,
+    detail_already_verified: bool = False,
+) -> tuple[float, float]:
     """Map the device-calibrated pencil anchor into the active game window.
 
     The exact-name geometry is the preferred choice.  A few Stage Manager
@@ -134,7 +139,8 @@ def _static_pencil_coordinates(proxy: SafeProxy, detail: Snapshot) -> tuple[floa
     observation = proxy.observation
     if observation is None or observation.width is None or observation.height is None:
         raise PolicyViolation("MCP 未返回触控空间")
-    _require_visual_detail(detail)
+    if not detail_already_verified:
+        _require_visual_detail(detail)
     base._remember_stage_geometry(proxy, detail)
     x_ratio, y_ratio, _label, _expected = base.ANCHORS["NAME_PENCIL"]
     return base.upright_ratio_to_touch(
@@ -309,8 +315,12 @@ def open_dynamic_rename_from_detail(
             raise PolicyViolation(
                 "点击动态铅笔后连续只读等待仍未回到详情或验证改名弹窗；未输入文字"
             )
+        # ``resolved`` has just been locally classified as DETAIL by the
+        # read-only post-tap loop.  Carry that fresh frame forward: keeping
+        # the pre-tap frame here can cause a transient stale-capture
+        # classifier failure to prevent the calibrated fallback from running.
+        detail = resolved
         if attempt == 1:
-            detail = resolved
             emit(
                 "status",
                 message="详情页已在只读复核中恢复；刷新名称边界后重试一次铅笔点击。",
@@ -318,7 +328,11 @@ def open_dynamic_rename_from_detail(
             continue
         break
 
-    x, y = _static_pencil_coordinates(proxy, detail)
+    x, y = _static_pencil_coordinates(
+        proxy,
+        detail,
+        detail_already_verified=True,
+    )
     emit(
         "status",
         message="动态名称边界两次未打开弹窗；改用已校准的详情页铅笔锚点复核一次。",
