@@ -316,14 +316,20 @@ def _navigate_from_current_detail_only(
 
     The adapter normally needs no v14 transition when it begins at DETAIL: it
     only opens the detail menu, chooses Appraise, and (where required) advances
-    the appraisal dialogue once.  Temporarily reject every legacy transition
-    *and* every tap outside that small allowlist.  The latter also protects the
-    v24 adapter's import-time reference to the historical base navigator.  The
-    original handlers are restored even when an appraisal read fails.
+    the appraisal dialogue once.  Do not call the v25/v14 wrapper here: that
+    wrapper re-classifies a fresh detail using broad accessibility text, and a
+    Stage Manager frame can then be mistaken for INVENTORY.  Its historical
+    recovery would consequently tap a storage card despite a direct-detail
+    batch already having established the next detail by pixel evidence.
+
+    The v24 reader wraps its import-time reference to the base navigator.  It
+    provides the required bounded, read-only appraisal measurement retries
+    while retaining the direct DETAIL -> DETAIL_MENU -> APPRAISAL route.  Keep
+    the tap allowlist as a final guard: even a future navigator regression
+    must not be able to enter the map or Pokémon box during a direct batch.
     """
 
     snapshot = _require_current_detail(snapshot)
-    original_transition = v14._transition
     original_tap = base._tap
     allowed_taps = {
         "DETAIL",
@@ -331,15 +337,6 @@ def _navigate_from_current_detail_only(
         "APPRAISAL_DIALOG",
         "APPRAISAL_CLOSE",
     }
-
-    def reject_legacy_entry_transition(
-        _proxy: SafeProxy, _candidate: Snapshot, source: str
-    ) -> tuple[Snapshot, str]:
-        raise PolicyViolation(
-            "从当前详情页连续模式检测到意外入口导航 "
-            f"({source})；已安全停止，不会点击精灵球、宝可梦盒、"
-            "第一只可见宝可梦、图鉴，也不会重启游戏"
-        )
 
     def direct_detail_tap(active_proxy: SafeProxy, key: str) -> None:
         if key not in allowed_taps:
@@ -350,13 +347,11 @@ def _navigate_from_current_detail_only(
             )
         original_tap(active_proxy, key)
 
-    v14._transition = reject_legacy_entry_transition
     base._tap = direct_detail_tap
     try:
-        return _navigate_with_complete_stale_recovery(proxy, snapshot)
+        return _navigate_with_read_only_measurement_retry(proxy, snapshot)
     finally:
         base._tap = original_tap
-        v14._transition = original_transition
 
 
 def _require_current_detail(snapshot: Snapshot) -> Snapshot:

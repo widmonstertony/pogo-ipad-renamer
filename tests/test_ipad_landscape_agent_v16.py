@@ -8,6 +8,7 @@ from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.ipad_landscape_agent_v16 import (
     RenamePencilLocalizationUnavailable,
     _locate_dynamic_pencil_with_read_only_retry,
+    _wait_for_dialog_or_detail_after_pencil,
     dynamic_pencil_point,
 )
 from pogo_iphone_renamer.local_ocr_v4 import (
@@ -118,6 +119,30 @@ class DynamicPencilTests(unittest.TestCase):
 
         self.assertIs(raised.exception.snapshot, snapshots[-1])
         self.assertEqual(refresh.call_count, 2)
+
+    def test_post_pencil_map_frame_waits_for_same_detail_without_a_second_tap(self) -> None:
+        first = Snapshot("map-looking", "first")
+        restored = Snapshot("detail", "restored")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._verified_dialog_snapshot",
+            return_value=None,
+        ) as dialog, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.local_page_state",
+            side_effect=["MAP", "DETAIL"],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._next_snapshot",
+            return_value=restored,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.emit"
+        ) as emit:
+            returned = _wait_for_dialog_or_detail_after_pencil(
+                object(), "電電蟲", first
+            )
+
+        self.assertIs(returned, restored)
+        self.assertEqual(dialog.call_count, 2)
+        next_snapshot.assert_called_once_with(unittest.mock.ANY, 0.8)
+        self.assertIn("只读等待", emit.call_args.kwargs["message"])
 
 
 if __name__ == "__main__":

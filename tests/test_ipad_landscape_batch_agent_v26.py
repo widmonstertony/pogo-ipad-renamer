@@ -10,7 +10,6 @@ from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.batch_navigation_v26 import DetailFingerprint
 from pogo_iphone_renamer.batch_pause import BatchPauseFile
 from pogo_iphone_renamer import ipad_landscape_agent as base
-from pogo_iphone_renamer import ipad_landscape_agent_v14 as v14
 from pogo_iphone_renamer.ipad_landscape_agent_v24 import (
     AppraisalMeasurementUnavailable,
 )
@@ -305,25 +304,28 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
 
         wait.assert_called_once_with(proxy, snapshot, allow_game_restart=False)
 
-    def test_current_detail_navigation_refuses_legacy_entry_before_any_tap(self) -> None:
+    def test_current_detail_navigation_uses_direct_reader_not_legacy_adapter(self) -> None:
         detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
-        original_transition = v14._transition
-
-        def attempt_legacy_entry(proxy, snapshot):
-            return v14._transition(proxy, snapshot, "INVENTORY")
+        appraisal = Snapshot("", "appraisal")
+        measurement = object()
 
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
         ), patch(
-            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
-            side_effect=attempt_legacy_entry,
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_read_only_measurement_retry",
+            return_value=(appraisal, measurement),
+        ) as direct_reader, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery"
+        ) as legacy_adapter, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.v14.navigate_to_appraisal_v14"
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"
         ) as tap:
-            with self.assertRaisesRegex(PolicyViolation, "第一只可见宝可梦"):
-                _navigate_from_current_detail_only(object(), detail)
+            returned = _navigate_from_current_detail_only(object(), detail)
 
-        self.assertIs(v14._transition, original_transition)
+        self.assertEqual(returned, (appraisal, measurement))
+        direct_reader.assert_called_once_with(ANY, detail)
+        legacy_adapter.assert_not_called()
         tap.assert_not_called()
 
     def test_current_detail_navigation_blocks_frozen_base_inventory_tap(self) -> None:
@@ -338,7 +340,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
         ), patch(
-            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_read_only_measurement_retry",
             side_effect=invoke_frozen_base_navigator,
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"
@@ -359,7 +361,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._validate_expected"
         ), patch(
-            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_complete_stale_recovery",
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_read_only_measurement_retry",
             side_effect=direct_appraisal_controls,
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._tap"

@@ -26,6 +26,7 @@ from .species_db import traditional_chinese_species
 # appeared yet, the existing OCR/accessibility proof and one bounded retry
 # remain unchanged.
 _RENAME_DIALOG_INITIAL_READ_DELAY_SECONDS = 0.65
+_POST_PENCIL_READ_ONLY_RECHECKS = 4
 
 
 class RenamePencilLocalizationUnavailable(PolicyViolation):
@@ -201,6 +202,37 @@ def _verified_dialog_snapshot(
     return Snapshot(text=proxy.observation.text, image=image)
 
 
+def _wait_for_dialog_or_detail_after_pencil(
+    proxy: SafeProxy, current_name: str, snapshot: Snapshot
+) -> Snapshot | None:
+    """Resolve a post-pencil transition without issuing another tap.
+
+    Stage Manager occasionally supplies a single stale MAP-classified frame
+    immediately after a correctly targeted name-pencil tap.  The original
+    code treated that one frame as a terminal failure even when the same
+    Pokémon detail was back on the next capture.  Read through that transient
+    state first; a delayed rename dialog wins over a second pencil tap.
+    """
+
+    candidate = snapshot
+    for attempt in range(1, _POST_PENCIL_READ_ONLY_RECHECKS + 1):
+        verified = _verified_dialog_snapshot(proxy, current_name)
+        if verified is not None:
+            return verified
+        if base.local_page_state(candidate) == "DETAIL":
+            return candidate
+        if attempt < _POST_PENCIL_READ_ONLY_RECHECKS:
+            emit(
+                "status",
+                message=(
+                    f"铅笔点击后第 {attempt} 帧页面暂未稳定；"
+                    "只读等待，不会在不明页面继续点击。"
+                ),
+            )
+            candidate = base._next_snapshot(proxy, 0.8)
+    return None
+
+
 def open_dynamic_rename_from_detail(
     proxy: SafeProxy, detail: Snapshot, current_name: str
 ) -> Snapshot:
@@ -210,25 +242,26 @@ def open_dynamic_rename_from_detail(
             proxy, detail, current_name, extra_gap=gap
         )
         _tap_dynamic_pencil_at(proxy, x, y)
-        verified = _verified_dialog_snapshot(proxy, current_name)
-        if verified is not None:
+        resolved = _wait_for_dialog_or_detail_after_pencil(
+            proxy,
+            current_name,
+            base._next_snapshot(proxy, 0.4),
+        )
+        if resolved is not None and base.local_page_state(resolved) == "RENAME_DIALOG":
             emit(
                 "status",
                 message="已根据当前名称宽度定位铅笔，改名窗口验证通过。",
             )
-            return verified
-
-        refreshed = base._next_snapshot(proxy, 0.4)
-        state = base.local_page_state(refreshed)
-        if state != "DETAIL":
+            return resolved
+        if resolved is None:
             raise PolicyViolation(
-                f"点击动态铅笔后页面变为 {state}，但改名弹窗证据不足；未输入文字"
+                "点击动态铅笔后连续只读等待仍未回到详情或验证改名弹窗；未输入文字"
             )
         if attempt == 1:
-            detail = refreshed
+            detail = resolved
             emit(
                 "status",
-                message="详情页确认未离开；刷新名称边界后重试一次铅笔点击。",
+                message="详情页已在只读复核中恢复；刷新名称边界后重试一次铅笔点击。",
             )
             continue
         break
