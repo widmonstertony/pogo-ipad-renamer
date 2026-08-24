@@ -442,7 +442,7 @@ def _bring_proven_direct_detail_to_foreground(
             "x": x,
             "y": y,
             "_observation_token": observation.token,
-            "_intent": "select the pixel-proven current Pokemon GO detail card",
+            "_intent": "navigate to the pixel-proven current Pokemon GO detail card",
             "_expected_after": "same Pokemon GO detail is foreground without multiwindow overlay",
         },
     )

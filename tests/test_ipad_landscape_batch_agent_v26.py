@@ -272,6 +272,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         name, arguments = proxy.calls[0]
         self.assertEqual(name, "tap_screen")
         self.assertEqual(arguments["_observation_token"], "fresh")
+        self.assertIn("navigate", arguments["_intent"])
         self.assertEqual((arguments["x"], arguments["y"]), (673.0, 674.0))
 
     def test_proven_direct_detail_does_not_tap_without_multiwindow_overlay(self) -> None:
