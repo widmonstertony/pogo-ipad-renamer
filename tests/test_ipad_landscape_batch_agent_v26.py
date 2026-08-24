@@ -156,6 +156,35 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         self.assertIs(returned, detail)
         cancel.assert_called_once_with(proxy, "涼脊龍")
 
+    def test_journalled_but_unapplied_input_cancels_proven_default_dialog(self) -> None:
+        settings = SimpleNamespace(journal_path=Path("/not-used"))
+        proxy = object()
+        dialog = Snapshot("rename", "dialog")
+        detail = Snapshot("detail", "detail")
+        cancelled = RenameFieldVerificationUnavailable(detail, "涼脊龍")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+            return_value="RENAME_DIALOG",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._last_unsubmitted_journal_nickname",
+            return_value="涼脊龍⓮⓯⓮⁹⁶",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._verified_entered_value",
+            return_value="涼脊龍",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._proven_default_name_in_rename_dialog",
+            return_value="涼脊龍",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._cancel_unverified_input",
+            side_effect=cancelled,
+        ) as cancel, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            returned = _resume_verified_unsubmitted_rename(proxy, dialog, settings)
+
+        self.assertIs(returned, detail)
+        cancel.assert_called_once_with(proxy, "涼脊龍")
+
     def test_default_dialog_proof_requires_name_inside_input_field(self) -> None:
         snapshot = Snapshot("rename", "dialog")
         boxes = SimpleNamespace(

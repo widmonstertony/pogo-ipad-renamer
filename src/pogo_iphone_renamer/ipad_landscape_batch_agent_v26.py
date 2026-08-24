@@ -484,6 +484,25 @@ def _resume_verified_unsubmitted_rename(
         raise PolicyViolation("默认名称弹窗取消流程未返回已验证详情页")
     actual = _verified_entered_value(proxy)
     if actual != candidate:
+        # A prior MCP input request can be durably journalled even though the
+        # Stage Manager text field never received it.  If the live pixels now
+        # prove that the field is still the untouched default species, this is
+        # not an ambiguous partial edit: cancel it automatically and restart
+        # the same detail.  Any other mismatch remains a hard stop.
+        default_name = _proven_default_name_in_rename_dialog(snapshot)
+        if default_name is not None:
+            emit(
+                "status",
+                message=(
+                    f"留档目标 {candidate} 未出现在字段中，当前仍是默认名称"
+                    f"{default_name}；自动取消空白弹窗后重试。"
+                ),
+            )
+            try:
+                _cancel_unverified_input(proxy, default_name)
+            except RenameFieldVerificationUnavailable as cancelled:
+                return cancelled.snapshot
+            raise PolicyViolation("默认名称弹窗取消流程未返回已验证详情页")
         raise PolicyViolation(
             "遗留改名字段与最后一次留档目标不一致；不会点击 OK 或取消"
         )
