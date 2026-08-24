@@ -368,6 +368,43 @@ def _require_current_detail(snapshot: Snapshot) -> Snapshot:
     return snapshot
 
 
+def _wait_for_verified_next_detail(
+    proxy: SafeProxy,
+    snapshot: Snapshot,
+    *,
+    seed_samples: tuple[Snapshot, ...],
+) -> Snapshot:
+    """Reconfirm a post-swipe detail without falling back to entry navigation.
+
+    ``swipe_to_verified_next`` has already established the new card from
+    three independent screenshots.  The broader DETAIL classifier can still
+    briefly miss that very same page while its labels settle.  In the
+    persistent direct-detail worker, keep reading that page until the coarse
+    classifier agrees; never treat this as permission to enter the box or to
+    restart the game.
+    """
+
+    try:
+        return _require_current_detail(snapshot)
+    except PolicyViolation:
+        persistent = os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold()
+        if len(seed_samples) != 3 or persistent not in {"1", "true", "yes", "on"}:
+            raise
+    emit(
+        "status",
+        message=(
+            "已验证翻页后的下一只详情暂未被页面分类器识别；后台保持运行并只读复核，"
+            "不会滑动、结束任务或重新打开游戏。"
+        ),
+    )
+    while True:
+        candidate = base._next_snapshot(proxy, 3.0)
+        try:
+            return _require_current_detail(candidate)
+        except PolicyViolation:
+            continue
+
+
 def _is_recoverable_navigation_failure(exc: Exception) -> bool:
     """Identify read-only/transition misses that are safe to recover from.
 
@@ -742,7 +779,9 @@ def _process_one(
     identity_seed_samples: tuple[Snapshot, ...] = (),
 ) -> tuple[Snapshot, str]:
     snapshot = (
-        _require_current_detail(snapshot)
+        _wait_for_verified_next_detail(
+            proxy, snapshot, seed_samples=identity_seed_samples
+        )
         if current_detail_only
         else _ensure_plain_detail(proxy, snapshot)
     )
