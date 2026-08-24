@@ -26,6 +26,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _confirm_low_confidence_measurement,
     _ensure_game_foreground,
     _ensure_plain_detail,
+    _bring_proven_direct_detail_to_foreground,
     _current_detail_only,
     _last_unsubmitted_journal_nickname,
     _restore_direct_detail_after_interrupted_appraisal,
@@ -215,7 +216,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
-            side_effect=[PolicyViolation("not yet"), detail],
+            side_effect=[PolicyViolation("not yet"), detail, detail],
         ) as require, patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
             return_value=detail,
@@ -227,9 +228,62 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             )
 
         self.assertIs(returned, detail)
-        self.assertEqual(require.call_count, 2)
+        self.assertEqual(require.call_count, 3)
         next_snapshot.assert_called_once_with(ANY, 3.0)
         emit.assert_called_once()
+
+    def test_proven_direct_detail_card_is_selected_once_to_clear_multiwindow(self) -> None:
+        detail = Snapshot("程序坞", "detail")
+        foreground = Snapshot("detail", "foreground")
+        observation = SimpleNamespace(token="fresh", width=1366.0, height=1024.0)
+        proxy = SimpleNamespace(observation=observation, calls=[])
+
+        def call_tool(name, arguments):
+            proxy.calls.append((name, arguments))
+            return {}
+
+        proxy.call_tool = call_tool
+        geometry = SimpleNamespace()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
+            side_effect=[detail, foreground],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._remember_stage_geometry"
+        ) as remember, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.current_stage_geometry",
+            return_value=geometry,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.upright_ratio_to_touch",
+            return_value=(673.0, 674.0),
+        ) as touch, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
+            return_value=foreground,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ):
+            returned = _bring_proven_direct_detail_to_foreground(proxy, detail)
+
+        self.assertIs(returned, foreground)
+        remember.assert_called_once_with(proxy, detail)
+        touch.assert_called_once_with(
+            1366.0, 1024.0, 0.5, 0.5, geometry=geometry
+        )
+        self.assertEqual(len(proxy.calls), 1)
+        name, arguments = proxy.calls[0]
+        self.assertEqual(name, "tap_screen")
+        self.assertEqual(arguments["_observation_token"], "fresh")
+        self.assertEqual((arguments["x"], arguments["y"]), (673.0, 674.0))
+
+    def test_proven_direct_detail_does_not_tap_without_multiwindow_overlay(self) -> None:
+        detail = Snapshot("detail", "detail")
+        proxy = SimpleNamespace(observation=None)
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
+            return_value=detail,
+        ):
+            returned = _bring_proven_direct_detail_to_foreground(proxy, detail)
+
+        self.assertIs(returned, detail)
 
     def test_verified_next_detail_waits_out_a_brief_classifier_miss(self) -> None:
         first = Snapshot("stale classifier", "first")

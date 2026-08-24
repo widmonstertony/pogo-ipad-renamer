@@ -73,6 +73,7 @@ _UNSAFE_STAGE_MANAGER_GEOMETRY = "detected Stage Manager game-window geometry is
 _DETAIL_IDENTITY_FAST_READ_DELAY_SECONDS = 0.8
 _MEASUREMENT_FAST_READ_DELAY_SECONDS = 0.9
 _CLOSE_APPRAISAL_FAST_READ_DELAY_SECONDS = 1.0
+_DIRECT_DETAIL_CARD_SAFE_RATIO = (0.50, 0.50)
 
 
 def _snapshot_digest(snapshot: Snapshot) -> str:
@@ -393,10 +394,66 @@ def _persistent_capture_wait_enabled() -> bool:
 
 
 def _has_ipad_task_switcher_overlay(snapshot: Snapshot) -> bool:
-    """Recognize the iPad task switcher without treating it as a game page."""
+    """Recognize the iPad multiwindow layer without treating it as a game page."""
 
     text = snapshot.text.casefold()
     return "程序坞" in text or "dock" in text
+
+
+def _bring_proven_direct_detail_to_foreground(
+    proxy: SafeProxy, snapshot: Snapshot
+) -> Snapshot:
+    """Reveal a pixel-proven Pokémon GO detail from the iPad multiwindow layer.
+
+    The screen can show Pokémon GO's live detail card beside other app cards
+    and the dock.  Waiting in that arrangement forever makes OCR return empty
+    frames even though the current detail is visible.  We may select only the
+    centre of the *already-proven* Pokémon GO card: its geometric centre is a
+    non-control area in the detail view, and this is the same card the user
+    had open before the overlay appeared.  No generic app-card coordinates,
+    box navigation, or game restart are permitted.
+    """
+
+    snapshot = _require_current_detail(snapshot)
+    if not _has_ipad_task_switcher_overlay(snapshot):
+        return snapshot
+    observation = proxy.observation
+    if observation is None or observation.width is None or observation.height is None:
+        raise PolicyViolation("恢复当前详情页前缺少新鲜屏幕观察；未执行触控")
+    base._remember_stage_geometry(proxy, snapshot)
+    geometry = base.current_stage_geometry(proxy)
+    x, y = base.upright_ratio_to_touch(
+        observation.width,
+        observation.height,
+        *_DIRECT_DETAIL_CARD_SAFE_RATIO,
+        geometry=geometry,
+    )
+    emit(
+        "status",
+        message=(
+            "检测到 Pokémon GO 当前详情被 iPad 多窗口布局覆盖；"
+            "只选择已核验的同一详情卡片以恢复前台，不会进入其他 App、"
+            "精灵球、宝可梦盒或重启游戏。"
+        ),
+    )
+    proxy.call_tool(
+        "tap_screen",
+        {
+            "x": x,
+            "y": y,
+            "_observation_token": observation.token,
+            "_intent": "select the pixel-proven current Pokemon GO detail card",
+            "_expected_after": "same Pokemon GO detail is foreground without multiwindow overlay",
+        },
+    )
+    restored = base._next_snapshot(proxy, 1.8)
+    restored = _require_current_detail(restored)
+    if _has_ipad_task_switcher_overlay(restored):
+        raise PolicyViolation(
+            "已选择经核验的当前 Pokémon GO 详情卡片，但多窗口布局仍未收起；"
+            "未重复点击、未进入其他页面"
+        )
+    return restored
 
 
 def _last_unsubmitted_journal_nickname(settings: Settings) -> str | None:
@@ -569,13 +626,15 @@ def _wait_for_direct_detail_after_task_switcher(
     """
 
     try:
-        return _require_current_detail(snapshot)
+        confirmed = _require_current_detail(snapshot)
     except PolicyViolation:
         if (
             not _persistent_capture_wait_enabled()
             or not _has_ipad_task_switcher_overlay(snapshot)
         ):
             raise
+    else:
+        return _bring_proven_direct_detail_to_foreground(proxy, confirmed)
     emit(
         "status",
         message=(
@@ -586,11 +645,12 @@ def _wait_for_direct_detail_after_task_switcher(
     while True:
         candidate = base._next_snapshot(proxy, 3.0)
         try:
-            return _require_current_detail(candidate)
+            confirmed = _require_current_detail(candidate)
         except PolicyViolation:
             if _has_ipad_task_switcher_overlay(candidate):
                 continue
             raise
+        return _bring_proven_direct_detail_to_foreground(proxy, confirmed)
 
 
 def _wait_for_verified_next_detail(
