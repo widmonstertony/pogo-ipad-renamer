@@ -23,6 +23,7 @@ from .native_agent_v2 import ResilientStreamableHTTPClient
 from .nickname import generate_iv_nickname, iv_percent
 from .policy import PolicyViolation
 from .server import SafeProxy
+from .species_db import traditional_chinese_species
 
 
 ORIENTATION = "STAGE_MANAGER_MAXIMIZED"
@@ -85,7 +86,7 @@ def _bright_fraction(snapshot: Snapshot) -> float:
     return sum(1 for red, green, blue in pixels if min(red, green, blue) >= 205) / len(pixels)
 
 
-def _detail_text_evidence(text: str) -> bool:
+def _detail_text_evidence(text: str, *, has_visible_species: bool = False) -> bool:
     """Recognize a detail page despite rotated OCR mangling the HP prefix.
 
     On the real landscape-right iPad, RapidOCR can read ``66/66 HP`` as
@@ -101,7 +102,21 @@ def _detail_text_evidence(text: str) -> bool:
     has_hp_fraction = bool(
         re.search(r"(?:[a-z]{0,2})?\d+\s*/\s*\d+(?:[a-z]{0,2})?", folded)
     )
-    return has_cp and has_weight and has_height and has_hp_fraction
+    if has_cp and has_weight and has_height and has_hp_fraction:
+        return True
+
+    # In the iPad multiwindow layout an overlapping adjacent card can hide
+    # CP/height while the *same local game crop* still clearly shows a known
+    # species, HP, weight and the Detail-only Strengthen/Evolve controls.  Do
+    # not fall through to MAP in that situation: a verified post-swipe detail
+    # must continue from this card, not wait forever for unrelated desktop text
+    # to disappear.  An exact local species makes this materially stronger
+    # than the generic HP/weight pair alone.
+    has_detail_actions = (
+        ("強化" in text or "强化" in text)
+        and ("進化" in text or "进化" in text)
+    )
+    return has_visible_species and has_weight and has_hp_fraction and has_detail_actions
 
 
 def local_page_state(snapshot: Snapshot) -> str:
@@ -145,7 +160,11 @@ def local_page_state(snapshot: Snapshot) -> str:
             pass
     if "清除文本" in text and ("完成" in text or "取消" in text):
         return "RENAME_DIALOG"
-    if _detail_text_evidence(text):
+    has_visible_species = any(
+        line.confidence >= 0.85 and line.text in traditional_chinese_species()
+        for line in local_lines
+    )
+    if _detail_text_evidence(text, has_visible_species=has_visible_species):
         return "DETAIL"
     if re.search(r"\d{3,}\s*/\s*\d{3,}", text) and "hp" not in text:
         return "INVENTORY"

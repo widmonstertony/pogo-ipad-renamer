@@ -50,6 +50,24 @@ class IPadLandscapeAgentTests(unittest.TestCase):
         ):
             self.assertEqual(local_page_state(snapshot), "RENAME_DIALOG")
 
+    def test_occluded_multitasking_detail_remains_a_detail(self) -> None:
+        snapshot = Snapshot(text="unrelated adjacent-window text", image="detail")
+        lines = (
+            unittest.mock.Mock(text="光蚪仔", confidence=0.99),
+            unittest.mock.Mock(text="dH66/66", confidence=0.99),
+            unittest.mock.Mock(text="0.49kg", confidence=0.99),
+            unittest.mock.Mock(text="強化", confidence=0.99),
+            unittest.mock.Mock(text="進化", confidence=0.99),
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.measure_ipad14_6_appraisal",
+            side_effect=ValueError("not appraisal"),
+        ), patch(
+            "pogo_iphone_renamer.local_ocr.ocr_mcp_screenshot",
+            return_value=lines,
+        ):
+            self.assertEqual(local_page_state(snapshot), "DETAIL")
+
     def test_appraisal_bars_are_never_accepted_as_plain_detail(self) -> None:
         snapshot = Snapshot(
             text="CP713 95/95HP 31.22kg 1.26m",
