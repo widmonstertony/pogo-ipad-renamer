@@ -68,6 +68,24 @@ class IPadLandscapeAgentTests(unittest.TestCase):
         ):
             self.assertEqual(local_page_state(snapshot), "DETAIL")
 
+    def test_merged_iv_nickname_remains_a_detail_but_not_a_default_name(self) -> None:
+        snapshot = Snapshot(text="unrelated adjacent-window text", image="detail")
+        lines = (
+            unittest.mock.Mock(text="光蚪仔131111", confidence=0.99),
+            unittest.mock.Mock(text="dH66/66", confidence=0.99),
+            unittest.mock.Mock(text="0.49kg", confidence=0.99),
+            unittest.mock.Mock(text="強化", confidence=0.99),
+            unittest.mock.Mock(text="進化", confidence=0.99),
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent.measure_ipad14_6_appraisal",
+            side_effect=ValueError("not appraisal"),
+        ), patch(
+            "pogo_iphone_renamer.local_ocr.ocr_mcp_screenshot",
+            return_value=lines,
+        ):
+            self.assertEqual(local_page_state(snapshot), "DETAIL")
+
     def test_team_leader_dialogue_is_not_mislabeled_as_map(self) -> None:
         snapshot = Snapshot(text="desktop", image="appraisal-dialog")
         lines = (

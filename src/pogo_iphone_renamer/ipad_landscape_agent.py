@@ -119,6 +119,32 @@ def _detail_text_evidence(text: str, *, has_visible_species: bool = False) -> bo
     return has_visible_species and has_weight and has_hp_fraction and has_detail_actions
 
 
+def _has_visible_detail_species(local_lines) -> bool:
+    """Recognize a default name or an OCR-merged deterministic IV nickname.
+
+    This is only page classification evidence.  Rename authorization still
+    comes from ``analyze_name_region`` and therefore keeps a merged
+    ``物种名+IV`` string classified as custom/already named.  The distinction
+    lets a just-submitted nickname return to DETAIL for commit verification
+    rather than being mistaken for the bright green main menu.
+    """
+
+    known = traditional_chinese_species()
+    for line in local_lines:
+        if line.confidence < 0.85:
+            continue
+        visible = line.text.strip()
+        if visible in known:
+            return True
+        for species in known:
+            if not visible.startswith(species):
+                continue
+            suffix = visible[len(species) :]
+            if suffix and any(character.isdigit() for character in suffix):
+                return True
+    return False
+
+
 def local_page_state(snapshot: Snapshot) -> str:
     if snapshot.image:
         try:
@@ -158,10 +184,7 @@ def local_page_state(snapshot: Snapshot) -> str:
                 return "RENAME_DIALOG"
         except Exception:
             pass
-    has_visible_species = any(
-        line.confidence >= 0.85 and line.text in traditional_chinese_species()
-        for line in local_lines
-    )
+    has_visible_species = _has_visible_detail_species(local_lines)
     # The team-leader text sits above the still-visible detail page and does
     # not include the red IV tracks yet.  Treat it as its own state so a
     # resumed worker advances the dialogue exactly once instead of calling it
