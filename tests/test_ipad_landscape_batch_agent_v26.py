@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.batch_navigation_v26 import DetailFingerprint
@@ -28,16 +28,19 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _ensure_game_foreground,
     _ensure_plain_detail,
     _current_detail_only,
+    _last_unsubmitted_journal_nickname,
     _restore_direct_detail_after_interrupted_appraisal,
     _is_recoverable_navigation_failure,
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
     _process_one,
+    _resume_verified_unsubmitted_rename,
     _wait_for_direct_detail_after_task_switcher,
     _wait_for_verified_next_detail,
     _wait_without_game_restart,
     _wait_at_safe_pause_boundary,
 )
+from pogo_iphone_renamer.config import Settings
 from pogo_iphone_renamer.landscape_cv import IVMeasurement
 from pogo_iphone_renamer.local_ocr_v3 import NameRegionResult
 from pogo_iphone_renamer.policy import Observation, PolicyViolation
@@ -53,6 +56,80 @@ def _default_name(species: str = "可達鴨") -> NameRegionResult:
 
 
 class BatchUnreadableAppraisalTests(unittest.TestCase):
+    def test_journal_only_returns_latest_uncommitted_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "actions.jsonl"
+            path.write_text(
+                "\n".join(
+                    (
+                        '{"event":"write_attempt","tool":"input_text","success":true,"arguments":{"text":"妙蛙種❽❿⓯⁷³"}}',
+                        '{"event":"verified_rename_keyboard_dismissed_dynamic_ok","new_name":"妙蛙種❽❿⓯⁷³"}',
+                        '{"event":"write_attempt","tool":"input_text","success":true,"arguments":{"text":"奈克洛❿❿⓫⁶⁹"}}',
+                    )
+                ),
+                encoding="utf-8",
+            )
+            settings = Settings(
+                mcp_url="http://127.0.0.1:8090/mcp",
+                health_url="http://127.0.0.1:8090/health",
+                protocol_version="2025-11-25",
+                pokemon_go_bundle_id="com.nianticlabs.pokemongo",
+                write_enabled=True,
+                batch_limit=0,
+                observation_ttl_seconds=20,
+                journal_path=path,
+            )
+            self.assertEqual(_last_unsubmitted_journal_nickname(settings), "奈克洛❿❿⓫⁶⁹")
+
+    def test_resume_commits_only_a_live_field_matching_journal_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "actions.jsonl"
+            path.write_text(
+                '{"event":"write_attempt","tool":"input_text","success":true,"arguments":{"text":"奈克洛❿❿⓫⁶⁹"}}\n',
+                encoding="utf-8",
+            )
+            settings = Settings(
+                mcp_url="http://127.0.0.1:8090/mcp",
+                health_url="http://127.0.0.1:8090/health",
+                protocol_version="2025-11-25",
+                pokemon_go_bundle_id="com.nianticlabs.pokemongo",
+                write_enabled=True,
+                batch_limit=0,
+                observation_ttl_seconds=20,
+                journal_path=path,
+            )
+            journal = Mock()
+            proxy = SimpleNamespace(
+                observation=SimpleNamespace(text="rename dialog"),
+                pending_name=None,
+                verified_renames=0,
+                journal=journal,
+            )
+            detail = Snapshot("detail", "detail")
+            with patch(
+                "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+                return_value="RENAME_DIALOG",
+            ), patch(
+                "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._verified_entered_value",
+                return_value="奈克洛❿❿⓫⁶⁹",
+            ), patch(
+                "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._dialog_evidence_after_keyboard_dismiss"
+            ), patch(
+                "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._submit_with_one_verified_retry",
+                return_value=detail,
+            ) as submit, patch(
+                "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+            ):
+                returned = _resume_verified_unsubmitted_rename(
+                    proxy, Snapshot("rename", "dialog"), settings
+                )
+
+            self.assertIs(returned, detail)
+            submit.assert_called_once_with(proxy, nickname="奈克洛❿❿⓫⁶⁹")
+            self.assertEqual(proxy.verified_renames, 1)
+            self.assertIsNone(proxy.pending_name)
+            journal.append.assert_called_once()
+
     def test_task_switcher_waits_for_existing_direct_detail(self) -> None:
         overview = Snapshot("程序坞\n账号安全", "overview")
         detail = Snapshot("detail", "detail")

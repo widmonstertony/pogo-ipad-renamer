@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -34,7 +35,10 @@ from .ipad_landscape_agent_v15 import (
 from .ipad_landscape_agent_v22 import (
     RenameFieldVerificationUnavailable,
     _commit_after_dismissing_keyboard,
+    _dialog_evidence_after_keyboard_dismiss,
+    _submit_with_one_verified_retry,
 )
+from .ipad_landscape_agent_v20 import _verified_entered_value
 from .ipad_landscape_agent_v24 import (
     AppraisalMeasurementUnavailable,
     _navigate_with_read_only_measurement_retry,
@@ -382,6 +386,99 @@ def _has_ipad_task_switcher_overlay(snapshot: Snapshot) -> bool:
 
     text = snapshot.text.casefold()
     return "程序坞" in text or "dock" in text
+
+
+def _last_unsubmitted_journal_nickname(settings: Settings) -> str | None:
+    """Return only the most recent input that lacks a later verified commit."""
+
+    candidate: str | None = None
+    try:
+        lines = settings.journal_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if (
+            record.get("event") == "write_attempt"
+            and record.get("tool") == "input_text"
+            and record.get("success") is True
+        ):
+            arguments = record.get("arguments")
+            value = arguments.get("text") if isinstance(arguments, dict) else None
+            if isinstance(value, str) and value.strip():
+                candidate = value.strip()
+            continue
+        if (
+            candidate
+            and str(record.get("event", "")).startswith("verified_rename")
+            and str(record.get("new_name", "")).strip() == candidate
+        ):
+            candidate = None
+    return candidate
+
+
+def _resume_verified_unsubmitted_rename(
+    proxy: SafeProxy, snapshot: Snapshot, settings: Settings
+) -> Snapshot:
+    """Commit a restart-interrupted edit only when both durable proofs agree.
+
+    A newly spawned worker has no in-memory pending-name state.  It may recover
+    exactly one edit only if the journal's last uncommitted input and the live
+    accessibility text field agree character-for-character.  Otherwise it
+    leaves the dialog untouched: unknown manual text is never submitted.
+    """
+
+    if base.local_page_state(snapshot) != "RENAME_DIALOG":
+        return snapshot
+    candidate = _last_unsubmitted_journal_nickname(settings)
+    if not candidate:
+        raise PolicyViolation("检测到未留档的改名弹窗；不会猜测提交或取消")
+    actual = _verified_entered_value(proxy)
+    if actual != candidate:
+        raise PolicyViolation(
+            "遗留改名字段与最后一次留档目标不一致；不会点击 OK 或取消"
+        )
+    if not snapshot.image:
+        raise PolicyViolation("遗留改名弹窗缺少截图；不会点击 OK")
+
+    # A fresh dialog proof is required in addition to the exact AX field.
+    # The helper performs reads only and provides the same evidence gate used
+    # by ordinary per-Pokémon submission.
+    _dialog_evidence_after_keyboard_dismiss(proxy)
+    if proxy.observation is None:
+        raise PolicyViolation("恢复留档改名前缺少安全观察")
+    proxy.observation.text += "\n重新命名（留档目标与当前字段逐字一致；恢复提交）"
+    verified_before = proxy.verified_renames
+    proxy.pending_name = candidate
+    emit(
+        "status",
+        message=(
+            f"已恢复上次中断的改名字段，并与留档目标逐字一致：{candidate}；"
+            "现在才会安全提交。"
+        ),
+    )
+    detail = _submit_with_one_verified_retry(proxy, nickname=candidate)
+    if proxy.pending_name is not None:
+        if proxy.pending_name != candidate or proxy.verified_renames != verified_before:
+            raise PolicyViolation("恢复提交后的待确认状态不一致")
+        proxy.verified_renames = verified_before + 1
+        proxy.pending_name = None
+    elif proxy.verified_renames != verified_before + 1:
+        raise PolicyViolation("恢复提交后成功计数未验证")
+    proxy.journal.append(
+        "verified_rename_recovered_after_task_switcher",
+        {
+            "new_name": candidate,
+            "evidence": "journal target + exact live field + dialog proof + DETAIL",
+        },
+    )
+    emit("status", message=f"✓ 已恢复并核验提交：{candidate}")
+    return detail
 
 
 def _wait_for_direct_detail_after_task_switcher(
@@ -1050,8 +1147,17 @@ def run(mode: str, settings: Settings) -> int:
                 "yes",
                 "on",
             }:
+                # The screenshot can retain iPad's surrounding task cards
+                # while the calibrated Pokémon GO crop itself is already a
+                # stable DETAIL.  Direct mode must trust that stronger local
+                # proof and continue its normal detail-only sequence; it must
+                # not block merely because unrelated SpringBoard AX text is
+                # still visible around the game surface.
                 snapshot = _restore_direct_detail_after_interrupted_appraisal(
                     proxy, snapshot
+                )
+                snapshot = _resume_verified_unsubmitted_rename(
+                    proxy, snapshot, settings
                 )
             current_detail_only = _current_detail_only(snapshot)
             if current_detail_only:
