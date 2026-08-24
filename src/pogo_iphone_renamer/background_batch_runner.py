@@ -15,6 +15,9 @@ import os
 import signal
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -69,7 +72,7 @@ def background_run_is_active(state_path: Path) -> bool:
         pid = int(state.get("pid", 0))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
-    if state.get("status") not in {"starting", "running"} or pid <= 0:
+    if state.get("status") not in {"starting", "waiting_for_mcp", "running"} or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -105,6 +108,50 @@ def _event_progress(line: str) -> dict[str, object] | None:
     return event
 
 
+def _mcp_health_available(health_url: str, *, timeout: float = 3.0) -> bool:
+    """Return whether the configured MCP endpoint is ready for a safe worker.
+
+    A Pokémon GO update or an iPad-side MCP restart can temporarily close the
+    service port.  Starting the worker during that window only creates a
+    misleading failure; this deliberately performs no phone action.
+    """
+
+    request = urllib.request.Request(health_url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("status") == "ok"
+
+
+def _is_recoverable_mcp_disconnect(lines: list[str]) -> bool:
+    """Recognize transport-only worker exits which are safe to reconnect.
+
+    This intentionally excludes page-classification and rename failures.  On
+    those failures the task stops for safety; only a lost MCP transport is
+    allowed to keep the detached owner alive and retry the exact direct route.
+    """
+
+    text = "\n".join(lines).casefold()
+    return any(
+        marker in text
+        for marker in (
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "network is unreachable",
+            "remote end closed connection",
+            "remotedisconnected",
+            "httpx.connecterror",
+            "urlerror",
+            "timed out",
+            "timeouterror",
+            "mcp transport",
+        )
+    )
+
+
 def run_background_batch(
     mode: str,
     *,
@@ -112,6 +159,8 @@ def run_background_batch(
     environment: dict[str, str] | None = None,
     popen: Callable[..., Any] = subprocess.Popen,
     awake_factory: Callable[[], AwakeGuard] = AwakeGuard,
+    health_check: Callable[[str], bool] = _mcp_health_available,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Run the deterministic worker independently from the desktop window."""
 
@@ -125,6 +174,7 @@ def run_background_batch(
     runner_pid = os.getpid()
     stopped = False
     child: Any | None = None
+    reconnects = 0
 
     def request_stop(_signum: int, _frame: object) -> None:
         nonlocal stopped
@@ -136,6 +186,43 @@ def run_background_batch(
     previous_int = signal.signal(signal.SIGINT, request_stop)
     awake = awake_factory()
     started_at = _now()
+
+    def wait_for_mcp() -> bool:
+        """Hold the detached job until MCP recovers, without touching iPad."""
+
+        nonlocal reconnects
+        health_url = env.get("IPHONE_MCP_HEALTH_URL", "")
+        # Unit/integration callers that do not provide a configured endpoint
+        # retain the historical runner behaviour.  The production headless
+        # launcher always supplies this value from the saved GUI settings.
+        if not health_url:
+            return True
+        while not stopped:
+            if health_url and health_check(health_url):
+                if reconnects:
+                    _append_log(
+                        log_path,
+                        "iOS MCP 连接已恢复；正在用当前代码重新读取当前宝可梦详情页。",
+                    )
+                return True
+            reconnects += 1
+            _write_state(
+                state_path,
+                status="waiting_for_mcp",
+                pid=runner_pid,
+                mode=mode,
+                started_at=started_at,
+                reconnects=reconnects,
+            )
+            if reconnects == 1:
+                _append_log(
+                    log_path,
+                    "iOS MCP 暂时不可连接；后台将保持防睡眠并只读等待恢复，"
+                    "不会触碰 iPad、重开游戏或进入宝可梦盒。",
+                )
+            sleep(10.0)
+        return False
+
     try:
         _write_state(
             state_path,
@@ -161,44 +248,68 @@ def run_background_batch(
                 finished_at=_now(),
             )
             return 1
-        child = popen(
-            worker_command(mode),
-            cwd=root,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        _write_state(
-            state_path,
-            status="running",
-            pid=runner_pid,
-            worker_pid=getattr(child, "pid", None),
-            mode=mode,
-            started_at=started_at,
-        )
-        stream: TextIO | None = child.stdout
-        if stream is not None:
-            for line in stream:
-                progress = _event_progress(line)
-                if progress is not None:
-                    _write_state(
-                        state_path,
-                        status="running",
-                        pid=runner_pid,
-                        worker_pid=getattr(child, "pid", None),
-                        mode=mode,
-                        started_at=started_at,
-                        progress=progress,
-                    )
-                message = friendly_ipad_landscape_event(line)
-                if message:
-                    _append_log(log_path, message)
-        code = child.wait()
+        while not stopped:
+            if not wait_for_mcp():
+                break
+            child = popen(
+                worker_command(mode),
+                cwd=root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            _write_state(
+                state_path,
+                status="running",
+                pid=runner_pid,
+                worker_pid=getattr(child, "pid", None),
+                mode=mode,
+                started_at=started_at,
+                reconnects=reconnects,
+            )
+            worker_lines: list[str] = []
+            stream: TextIO | None = child.stdout
+            if stream is not None:
+                for line in stream:
+                    worker_lines.append(line)
+                    progress = _event_progress(line)
+                    if progress is not None:
+                        _write_state(
+                            state_path,
+                            status="running",
+                            pid=runner_pid,
+                            worker_pid=getattr(child, "pid", None),
+                            mode=mode,
+                            started_at=started_at,
+                            reconnects=reconnects,
+                            progress=progress,
+                        )
+                    message = friendly_ipad_landscape_event(line)
+                    if message:
+                        _append_log(log_path, message)
+            code = child.wait()
+            if code == 0 or stopped:
+                break
+            if not (
+                _is_recoverable_mcp_disconnect(worker_lines)
+                or not health_check(env.get("IPHONE_MCP_HEALTH_URL", ""))
+            ):
+                break
+            _append_log(
+                log_path,
+                "iOS MCP 在任务中断开；仅等待连接恢复后从当前详情页重新读取，"
+                "不会重开游戏或改动其他页面。",
+            )
+            child = None
+        else:
+            code = 1
+        if stopped and (child is None or child.poll() is not None):
+            code = 1
         status = "stopped" if stopped else "finished" if code == 0 else "failed"
         _write_state(
             state_path,

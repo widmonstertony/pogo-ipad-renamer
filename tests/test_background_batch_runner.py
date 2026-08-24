@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pogo_iphone_renamer.background_batch_runner import (
+    _is_recoverable_mcp_disconnect,
     background_run_is_active,
     request_background_stop,
     run_background_batch,
@@ -96,6 +97,50 @@ class BackgroundBatchRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertFalse(background_run_is_active(path))
+
+    def test_waiting_for_mcp_is_an_active_detached_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text(
+                json.dumps({"status": "waiting_for_mcp", "pid": os.getpid()}),
+                encoding="utf-8",
+            )
+            self.assertTrue(background_run_is_active(path))
+
+    def test_runner_waits_for_mcp_before_starting_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            awake = _FakeAwake()
+            calls: list[tuple[object, object]] = []
+            checks = iter((False, True))
+
+            def popen(command, **kwargs):  # type: ignore[no-untyped-def]
+                calls.append((command, kwargs))
+                return _FakeProcess()
+
+            code = run_background_batch(
+                "rename",
+                root=root,
+                environment={
+                    "POGO_BACKGROUND_LOG": str(root / "worker.log"),
+                    "POGO_BATCH_STATE": str(root / "state.json"),
+                    "IPHONE_MCP_HEALTH_URL": "http://device/health",
+                },
+                popen=popen,
+                awake_factory=lambda: awake,  # type: ignore[arg-type]
+                health_check=lambda _url: next(checks),
+                sleep=lambda _seconds: None,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(calls), 1)
+            log = (root / "worker.log").read_text(encoding="utf-8")
+            self.assertIn("暂时不可连接", log)
+            self.assertIn("连接已恢复", log)
+
+    def test_only_transport_errors_are_reconnectable(self) -> None:
+        self.assertTrue(_is_recoverable_mcp_disconnect(["URLError: Connection refused"]))
+        self.assertFalse(_is_recoverable_mcp_disconnect(["当前不是详情页"] ))
 
     def test_stop_request_signals_live_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
