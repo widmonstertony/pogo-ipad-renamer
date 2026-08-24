@@ -112,6 +112,23 @@ class StageManagerMappingTests(unittest.TestCase):
         self.assertAlmostEqual(geometry.right, 594, delta=5)
         self.assertAlmostEqual(geometry.bottom, 1334, delta=5)
 
+    def test_calibrated_window_remains_usable_when_adjacent_card_covers_bottom(self) -> None:
+        image = Image.new("RGB", (1024, 1366), (32, 78, 112))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 28, 1004, 155), fill=(225, 225, 225))
+        # The real iPad's adjacent-card layout retains the calibrated side
+        # edges but shortens the visible lower edge to roughly 1.98:1.
+        draw.rectangle((106, 190, 594, 1156), fill=(75, 105, 135))
+        draw.line((106, 190, 106, 1156), fill=(235, 235, 235), width=2)
+        draw.line((594, 190, 594, 1156), fill=(15, 15, 15), width=2)
+
+        geometry = stage_manager_geometry(image, use_preferred=False)
+
+        self.assertAlmostEqual(geometry.left, 106, delta=5)
+        self.assertAlmostEqual(geometry.right, 594, delta=5)
+        self.assertAlmostEqual(geometry.top, 190, delta=6)
+        self.assertAlmostEqual(geometry.bottom, 1156, delta=6)
+
     def test_current_pale_green_menu_is_not_mislabeled_as_map(self) -> None:
         image = Image.new("RGB", (1024, 1366), (20, 45, 70))
         draw = ImageDraw.Draw(image)

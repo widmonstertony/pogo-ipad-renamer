@@ -60,6 +60,26 @@ class NameRegionClassificationTests(unittest.TestCase):
         self.assertFalse(result.is_default)
         self.assertEqual(result.species, "輕飄飄")
 
+    def test_occluded_title_row_uses_the_shifted_fallback_crop(self) -> None:
+        standard_row = (OCRLine("dH66/66", 1.0),)
+        occluded_row = (OCRLine("光蚪仔", 1.0),)
+        with (
+            patch.object(
+                local_ocr_v3,
+                "rotate_mcp_image_upright",
+                return_value=Image.new("RGB", (1366, 1024)),
+            ),
+            patch.object(
+                local_ocr_v3,
+                "ocr_image",
+                side_effect=(standard_row, occluded_row),
+            ),
+        ):
+            result = local_ocr_v3.analyze_name_region("unused", "unused")
+
+        self.assertTrue(result.is_default)
+        self.assertEqual(result.species, "光蚪仔")
+
 
 if __name__ == "__main__":
     unittest.main()

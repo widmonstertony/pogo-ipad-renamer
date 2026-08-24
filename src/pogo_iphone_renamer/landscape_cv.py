@@ -202,11 +202,19 @@ def _portrait_stage_manager_geometry(image: Image.Image) -> StageManagerGeometry
         right=raw_right,
         bottom=raw_bottom,
     )
+    # An adjacent Stage Manager card may cover the lower portion of this
+    # already-calibrated Pokémon GO window.  In that layout the two outer
+    # vertical edges still match the iPad14,6 calibration exactly, but the
+    # visible height contracts to about 1.98:1.  Accept that narrower ratio
+    # only for the calibrated edge pair; generic edge-pair detection retains
+    # the stricter 2.15:1 lower bound to avoid selecting an unrelated card.
+    minimum_aspect_ratio = 1.90 if calibrated_pair else 2.15
+    minimum_bottom_ratio = 0.82 if calibrated_pair else 0.90
     if not (
         geometry.width > 0
         and geometry.height > 0
-        and 2.15 <= geometry.height / geometry.width <= 2.60
-        and geometry.bottom >= round(raw_height * 0.90)
+        and minimum_aspect_ratio <= geometry.height / geometry.width <= 2.60
+        and geometry.bottom >= round(raw_height * minimum_bottom_ratio)
     ):
         raise ValueError("detected Stage Manager game-window geometry is unsafe")
     return geometry

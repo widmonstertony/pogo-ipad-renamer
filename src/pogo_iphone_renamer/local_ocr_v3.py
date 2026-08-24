@@ -34,6 +34,13 @@ NUMBER_TOKEN = re.compile(r"^\d{1,3}$")
 # rejected by the strict species match below.
 NAME_ROW_TOP = 0.47
 NAME_ROW_BOTTOM = 0.55
+# When a neighboring Stage Manager card covers part of the active Pokémon GO
+# window, the still-visible detail page is vertically compressed after it is
+# normalized to the canonical frame.  Its title row moves upward by roughly
+# 8%.  This is a fallback only after the ordinary title-row crop has failed;
+# a regular unoccluded page keeps the narrower primary crop above.
+OCCLUDED_NAME_ROW_TOP = 0.38
+OCCLUDED_NAME_ROW_BOTTOM = 0.47
 
 
 @dataclass(frozen=True)
@@ -47,19 +54,26 @@ class NameRegionResult:
 def analyze_name_region(image_base64: str, orientation: str) -> NameRegionResult:
     image = rotate_mcp_image_upright(image_base64, orientation)
     width, height = image.size
-    region = image.crop(
-        (
-            round(width * 0.30),
-            round(height * NAME_ROW_TOP),
-            round(width * 0.70),
-            round(height * NAME_ROW_BOTTOM),
-        )
-    )
-    region = region.resize((region.width * 2, region.height * 2))
-    region = ImageEnhance.Contrast(region).enhance(1.8)
-    lines = tuple(line for line in ocr_image(region) if line.confidence >= 0.85)
     known = traditional_chinese_species()
+
+    def read_row(top: float, bottom: float) -> tuple[OCRLine, ...]:
+        region = image.crop(
+            (
+                round(width * 0.30),
+                round(height * top),
+                round(width * 0.70),
+                round(height * bottom),
+            )
+        )
+        region = region.resize((region.width * 2, region.height * 2))
+        region = ImageEnhance.Contrast(region).enhance(1.8)
+        return tuple(line for line in ocr_image(region) if line.confidence >= 0.85)
+
+    lines = read_row(NAME_ROW_TOP, NAME_ROW_BOTTOM)
     matches = {line.text: line.confidence for line in lines if line.text in known}
+    if not matches:
+        lines = read_row(OCCLUDED_NAME_ROW_TOP, OCCLUDED_NAME_ROW_BOTTOM)
+        matches = {line.text: line.confidence for line in lines if line.text in known}
     evidence = tuple(line.text for line in lines)
     if len(matches) > 1:
         raise PolicyViolation("名称区域同时匹配多个繁中物种；已停止")
