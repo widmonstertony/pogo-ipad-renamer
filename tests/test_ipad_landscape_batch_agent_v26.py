@@ -33,6 +33,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
     _process_one,
+    _wait_for_direct_detail_after_task_switcher,
     _wait_for_verified_next_detail,
     _wait_without_game_restart,
     _wait_at_safe_pause_boundary,
@@ -52,6 +53,29 @@ def _default_name(species: str = "可達鴨") -> NameRegionResult:
 
 
 class BatchUnreadableAppraisalTests(unittest.TestCase):
+    def test_task_switcher_waits_for_existing_direct_detail(self) -> None:
+        overview = Snapshot("程序坞\n账号安全", "overview")
+        detail = Snapshot("detail", "detail")
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
+            side_effect=[PolicyViolation("not yet"), detail],
+        ) as require, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
+            return_value=detail,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ) as emit:
+            returned = _wait_for_direct_detail_after_task_switcher(
+                object(), overview
+            )
+
+        self.assertIs(returned, detail)
+        self.assertEqual(require.call_count, 2)
+        next_snapshot.assert_called_once_with(ANY, 3.0)
+        emit.assert_called_once()
+
     def test_verified_next_detail_waits_out_a_brief_classifier_miss(self) -> None:
         first = Snapshot("stale classifier", "first")
         recovered = Snapshot("detail", "recovered")

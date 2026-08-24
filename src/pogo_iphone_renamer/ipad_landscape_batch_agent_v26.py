@@ -368,6 +368,58 @@ def _require_current_detail(snapshot: Snapshot) -> Snapshot:
     return snapshot
 
 
+def _persistent_capture_wait_enabled() -> bool:
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _has_ipad_task_switcher_overlay(snapshot: Snapshot) -> bool:
+    """Recognize the iPad task switcher without treating it as a game page."""
+
+    text = snapshot.text.casefold()
+    return "程序坞" in text or "dock" in text
+
+
+def _wait_for_direct_detail_after_task_switcher(
+    proxy: SafeProxy, snapshot: Snapshot
+) -> Snapshot:
+    """Keep a direct-detail task alive while iPad's task switcher covers it.
+
+    The overview can expose other app cards even though Pokémon GO remains
+    running with the target detail underneath.  There is no safe generic card
+    coordinate, so this path only reads until the existing Pokémon GO detail
+    becomes visible again; it never selects another app or starts the game.
+    """
+
+    try:
+        return _require_current_detail(snapshot)
+    except PolicyViolation:
+        if (
+            not _persistent_capture_wait_enabled()
+            or not _has_ipad_task_switcher_overlay(snapshot)
+        ):
+            raise
+    emit(
+        "status",
+        message=(
+            "检测到 iPad 多任务切换层覆盖 Pokémon GO 详情；后台保持运行并只读等待详情恢复，"
+            "不会选择其他 App、进入宝可梦盒或重新打开游戏。"
+        ),
+    )
+    while True:
+        candidate = base._next_snapshot(proxy, 3.0)
+        try:
+            return _require_current_detail(candidate)
+        except PolicyViolation:
+            if _has_ipad_task_switcher_overlay(candidate):
+                continue
+            raise
+
+
 def _wait_for_verified_next_detail(
     proxy: SafeProxy,
     snapshot: Snapshot,
@@ -387,8 +439,7 @@ def _wait_for_verified_next_detail(
     try:
         return _require_current_detail(snapshot)
     except PolicyViolation:
-        persistent = os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold()
-        if len(seed_samples) != 3 or persistent not in {"1", "true", "yes", "on"}:
+        if len(seed_samples) != 3 or not _persistent_capture_wait_enabled():
             raise
     emit(
         "status",
@@ -1011,7 +1062,7 @@ def run(mode: str, settings: Settings) -> int:
                         "图鉴，也不会重启游戏。"
                     ),
                 )
-                snapshot = _require_current_detail(snapshot)
+                snapshot = _wait_for_direct_detail_after_task_switcher(proxy, snapshot)
             else:
                 try:
                     snapshot = _ensure_game_foreground(proxy, snapshot)
