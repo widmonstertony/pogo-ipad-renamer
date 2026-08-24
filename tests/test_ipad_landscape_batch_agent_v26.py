@@ -136,7 +136,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._require_current_detail",
-            return_value=detail,
+            side_effect=[PolicyViolation("not yet"), detail],
         ) as require, patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
             return_value=detail,
@@ -148,7 +148,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             )
 
         self.assertIs(returned, detail)
-        self.assertEqual(require.call_count, 1)
+        self.assertEqual(require.call_count, 2)
         next_snapshot.assert_called_once_with(ANY, 3.0)
         emit.assert_called_once()
 

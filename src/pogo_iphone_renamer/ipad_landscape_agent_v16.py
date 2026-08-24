@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 
 from . import ipad_landscape_agent as base
@@ -122,6 +121,31 @@ def _dynamic_pencil_coordinates(
     )
 
 
+def _static_pencil_coordinates(proxy: SafeProxy, detail: Snapshot) -> tuple[float, float]:
+    """Map the device-calibrated pencil anchor into the active game window.
+
+    The exact-name geometry is the preferred choice.  A few Stage Manager
+    captures can, however, rescale the text glyph box by several pixels while
+    leaving the actual pencil at the original calibrated anchor.  This is a
+    last pre-input fallback after both dynamic positions were read and tapped
+    without a dialog; it remains inside the verified name-row control.
+    """
+
+    observation = proxy.observation
+    if observation is None or observation.width is None or observation.height is None:
+        raise PolicyViolation("MCP 未返回触控空间")
+    _require_visual_detail(detail)
+    base._remember_stage_geometry(proxy, detail)
+    x_ratio, y_ratio, _label, _expected = base.ANCHORS["NAME_PENCIL"]
+    return base.upright_ratio_to_touch(
+        observation.width,
+        observation.height,
+        x_ratio,
+        y_ratio,
+        geometry=base.current_stage_geometry(proxy),
+    )
+
+
 def _tap_dynamic_pencil_at(proxy: SafeProxy, x: float, y: float) -> None:
     observation = proxy.observation
     if observation is None:
@@ -152,38 +176,6 @@ def _require_visual_detail(snapshot: Snapshot) -> None:
 
     if base.local_page_state(snapshot) != "DETAIL":
         raise PolicyViolation("详情页局部像素证明暂不可用；不会定位或点击名称铅笔")
-
-
-def _task_switcher_thumbnail_visible(proxy: SafeProxy, snapshot: Snapshot) -> bool:
-    """Detect a shrunken Pokémon GO card, not a live game window.
-
-    iPad's app switcher leaves a visually convincing detail page inside the
-    Pokémon GO thumbnail.  Pixel OCR can still read that card, but taps are
-    not delivered to the game.  A thumbnail is materially narrower and lower
-    than the maximized Stage Manager game surface on the calibrated device.
-    """
-
-    if not snapshot.image:
-        return False
-    try:
-        base._remember_stage_geometry(proxy, snapshot)
-        geometry = base.current_stage_geometry(proxy)
-    except PolicyViolation:
-        return False
-    return (
-        geometry.raw_width < geometry.raw_height
-        and geometry.width / geometry.raw_width <= 0.60
-        and geometry.top / geometry.raw_height >= 0.10
-    )
-
-
-def _persistent_capture_wait_enabled() -> bool:
-    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def _locate_dynamic_pencil_with_read_only_retry(
@@ -271,28 +263,10 @@ def _wait_for_dialog_or_detail_after_pencil(
     """
 
     candidate = snapshot
-    task_switcher_reported = False
     for attempt in range(1, _POST_PENCIL_READ_ONLY_RECHECKS + 1):
         verified = _verified_dialog_snapshot(proxy, current_name)
         if verified is not None:
             return verified
-        if _task_switcher_thumbnail_visible(proxy, candidate):
-            if not _persistent_capture_wait_enabled():
-                return None
-            if not task_switcher_reported:
-                emit(
-                    "status",
-                    message=(
-                        "iPad 多任务切换层覆盖同一只宝可梦的改名窗口；"
-                        "后台保持运行并只读等待，不会在缩略卡片上点击铅笔或 OK。"
-                    ),
-                )
-                task_switcher_reported = True
-            while _task_switcher_thumbnail_visible(proxy, candidate):
-                candidate = base._next_snapshot(proxy, 3.0)
-            # The recovered foreground frame is still read-only evidence; a
-            # delayed dialog wins before this function can consider a retry.
-            continue
         if base.local_page_state(candidate) == "DETAIL":
             return candidate
         if attempt < _POST_PENCIL_READ_ONLY_RECHECKS:
@@ -343,7 +317,29 @@ def open_dynamic_rename_from_detail(
             )
             continue
         break
-    raise PolicyViolation("动态铅笔两次均未打开已验证的改名窗口；未输入文字")
+
+    x, y = _static_pencil_coordinates(proxy, detail)
+    emit(
+        "status",
+        message="动态名称边界两次未打开弹窗；改用已校准的详情页铅笔锚点复核一次。",
+    )
+    _tap_dynamic_pencil_at(proxy, x, y)
+    resolved = _wait_for_dialog_or_detail_after_pencil(
+        proxy,
+        current_name,
+        base._next_snapshot(proxy, 0.4),
+    )
+    if resolved is not None and base.local_page_state(resolved) == "RENAME_DIALOG":
+        emit(
+            "status",
+            message="已根据已校准详情页铅笔锚点，改名窗口验证通过。",
+        )
+        return resolved
+    if resolved is None:
+        raise PolicyViolation(
+            "备用铅笔点击后连续只读等待仍未回到详情或验证改名弹窗；未输入文字"
+        )
+    raise PolicyViolation("动态与已校准备用铅笔均未打开已验证改名窗口；未输入文字")
 
 
 def _open_verified_rename_dialog(

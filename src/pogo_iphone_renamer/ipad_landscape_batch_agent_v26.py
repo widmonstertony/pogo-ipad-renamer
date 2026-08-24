@@ -26,7 +26,6 @@ from .config import BATCH_LIMIT_UNLIMITED, Settings
 from .device_run_lock import DeviceRunLock
 from .ipad_landscape_agent_v16 import (
     RenamePencilLocalizationUnavailable,
-    _task_switcher_thumbnail_visible,
     open_dynamic_rename_from_detail,
 )
 from .ipad_landscape_agent_v15 import (
@@ -377,19 +376,11 @@ def _persistent_capture_wait_enabled() -> bool:
     }
 
 
-def _has_ipad_task_switcher_overlay(
-    snapshot: Snapshot, proxy: SafeProxy | None = None
-) -> bool:
+def _has_ipad_task_switcher_overlay(snapshot: Snapshot) -> bool:
     """Recognize the iPad task switcher without treating it as a game page."""
 
     text = snapshot.text.casefold()
-    if "程序坞" in text or "dock" in text:
-        return True
-    # SpringBoard's accessibility tree can report Pokémon GO as foreground
-    # even while the visual task switcher is on top, omitting both “程序坞”
-    # and “dock”.  The small inset game-card geometry is then the only usable
-    # evidence.  It is read-only and must never authorize a card tap.
-    return proxy is not None and _task_switcher_thumbnail_visible(proxy, snapshot)
+    return "程序坞" in text or "dock" in text
 
 
 def _last_unsubmitted_journal_nickname(settings: Settings) -> str | None:
@@ -496,18 +487,14 @@ def _wait_for_direct_detail_after_task_switcher(
     becomes visible again; it never selects another app or starts the game.
     """
 
-    if _has_ipad_task_switcher_overlay(snapshot, proxy):
-        if not _persistent_capture_wait_enabled():
-            raise PolicyViolation("iPad 多任务切换层覆盖 Pokémon GO；不会在缩略卡片上点击")
-    else:
-        try:
-            return _require_current_detail(snapshot)
-        except PolicyViolation:
-            if (
-                not _persistent_capture_wait_enabled()
-                or not _has_ipad_task_switcher_overlay(snapshot, proxy)
-            ):
-                raise
+    try:
+        return _require_current_detail(snapshot)
+    except PolicyViolation:
+        if (
+            not _persistent_capture_wait_enabled()
+            or not _has_ipad_task_switcher_overlay(snapshot)
+        ):
+            raise
     emit(
         "status",
         message=(
@@ -517,12 +504,10 @@ def _wait_for_direct_detail_after_task_switcher(
     )
     while True:
         candidate = base._next_snapshot(proxy, 3.0)
-        if _has_ipad_task_switcher_overlay(candidate, proxy):
-            continue
         try:
             return _require_current_detail(candidate)
         except PolicyViolation:
-            if _has_ipad_task_switcher_overlay(candidate, proxy):
+            if _has_ipad_task_switcher_overlay(candidate):
                 continue
             raise
 

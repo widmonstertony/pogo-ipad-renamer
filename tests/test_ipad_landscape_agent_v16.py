@@ -9,6 +9,7 @@ from pogo_iphone_renamer.ipad_landscape_agent_v16 import (
     RenamePencilLocalizationUnavailable,
     _locate_dynamic_pencil_with_read_only_retry,
     _require_visual_detail,
+    _static_pencil_coordinates,
     _wait_for_dialog_or_detail_after_pencil,
     dynamic_pencil_point,
 )
@@ -59,6 +60,30 @@ class DynamicPencilTests(unittest.TestCase):
         self.assertAlmostEqual(long.box.left, 542.0, places=1)
         self.assertAlmostEqual(long.box.right, 822.0, places=1)
         self.assertAlmostEqual(short.box.center_y, 528.5, places=1)
+
+    def test_static_pencil_fallback_maps_the_calibrated_anchor(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(width=1366, height=1024, token="fresh")
+        )
+        detail = Snapshot("detail", "frame")
+        expected = (753.0, 723.0)
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
+        ) as require_detail, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._remember_stage_geometry"
+        ) as remember, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.current_stage_geometry",
+            return_value=object(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.upright_ratio_to_touch",
+            return_value=expected,
+        ) as map_point:
+            returned = _static_pencil_coordinates(proxy, detail)
+
+        self.assertEqual(returned, expected)
+        require_detail.assert_called_once_with(detail)
+        remember.assert_called_once_with(proxy, detail)
+        self.assertEqual(map_point.call_args.args[:4], (1366, 1024, 0.6006, 0.5081))
 
     def test_rejects_text_outside_name_row(self) -> None:
         located = LocatedText(
