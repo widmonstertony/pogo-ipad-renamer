@@ -79,6 +79,27 @@ def analyze_name_region(image_base64: str, orientation: str) -> NameRegionResult
         raise PolicyViolation("名称区域同时匹配多个繁中物种；已停止")
     species = next(iter(matches), None)
     if species is None:
+        # In a narrow/moved Stage Manager card RapidOCR can join the title and
+        # all circled IV glyphs into one line (for example ``炭小侍151513``).
+        # That is enough to prove this is *not* the untouched default name,
+        # without reconstructing or inventing the Unicode nickname.  Only a
+        # known exact species prefix followed by a digit is accepted; labels
+        # such as ``炭小侍的糖果`` remain unreadable rather than custom.
+        full_lines = tuple(
+            line for line in ocr_image(image) if line.confidence >= 0.85
+        )
+        for line in full_lines:
+            for known_species in sorted(known, key=len, reverse=True):
+                if not line.text.startswith(known_species):
+                    continue
+                suffix = line.text.removeprefix(known_species)
+                if suffix and any(char.isdigit() for char in suffix):
+                    return NameRegionResult(
+                        known_species,
+                        False,
+                        line.confidence,
+                        (line.text,),
+                    )
         return NameRegionResult(None, False, 0.0, evidence)
 
     # Circled IV and superscript percentage glyphs are recognized by PP-OCR as

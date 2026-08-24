@@ -105,7 +105,10 @@ def _remember_fresh_frames(proxy: SafeProxy, digests: list[str]) -> None:
 def _detail_name_key(result: NameRegionResult) -> tuple[str, str]:
     if result.is_default and result.species:
         return "default", result.species
-    return "custom", ""
+    # A custom-name skip is safe only when the title itself supplied evidence.
+    # An empty OCR crop is not a nickname and must never be grouped with other
+    # unreadable frames as if all three were the same Pokémon.
+    return "custom", "|".join(result.evidence)
 
 
 def _confirm_fresh_detail_identity(
@@ -143,6 +146,8 @@ def _confirm_fresh_detail_identity(
             try:
                 result = analyze_name_region(candidate.image, base.ORIENTATION)
             except PolicyViolation:
+                continue
+            if not result.is_default and not result.evidence:
                 continue
             if default_only and (not result.is_default or not result.species):
                 # Reusing post-swipe evidence is an optimization only for a

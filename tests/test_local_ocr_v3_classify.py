@@ -60,6 +60,13 @@ class NameRegionClassificationTests(unittest.TestCase):
         self.assertFalse(result.is_default)
         self.assertEqual(result.species, "輕飄飄")
 
+    def test_joined_species_and_iv_digits_is_custom_without_reconstructing_name(self) -> None:
+        result = self.classify((OCRLine("炭小侍151513", 0.99),))
+
+        self.assertFalse(result.is_default)
+        self.assertEqual(result.species, "炭小侍")
+        self.assertEqual(result.evidence, ("炭小侍151513",))
+
     def test_occluded_title_row_uses_the_shifted_fallback_crop(self) -> None:
         standard_row = (OCRLine("dH66/66", 1.0),)
         occluded_row = (OCRLine("光蚪仔", 1.0),)
