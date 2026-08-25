@@ -140,6 +140,11 @@ class BackgroundBatchRunnerTests(unittest.TestCase):
 
     def test_only_transport_errors_are_reconnectable(self) -> None:
         self.assertTrue(_is_recoverable_mcp_disconnect(["URLError: Connection refused"]))
+        self.assertTrue(
+            _is_recoverable_mcp_disconnect(
+                ["MCP request failed: <urlopen error [Errno 65] No route to host>"]
+            )
+        )
         self.assertFalse(_is_recoverable_mcp_disconnect(["当前不是详情页"] ))
 
     def test_stop_request_signals_live_runner(self) -> None:

@@ -1214,7 +1214,10 @@ def run(mode: str, settings: Settings) -> int:
         # black MCP frame into a Home/launch/restart sequence.
         v14._wait_until_visible = _wait_without_game_restart
         try:
-            client = ResilientStreamableHTTPClient(settings, timeout=120.0)
+            # The detached background runner owns MCP recovery.  Keep one
+            # request short so a route loss returns control to that runner
+            # quickly, rather than pinning this current-detail worker.
+            client = ResilientStreamableHTTPClient(settings, timeout=20.0)
             device = base._device_details(client.call_tool("get_device_info", {}))
             if str(device.get("machine", "")) != "iPad14,6":
                 raise PolicyViolation("批量横屏流程目前只支持已校准的 iPad14,6")

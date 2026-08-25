@@ -12,7 +12,11 @@ class ResilientStreamableHTTPClient(StreamableHTTPClient):
     """Reconnect and retry reads only; writes are never replayed."""
 
     def __init__(self, settings: Any, timeout: float = 120.0) -> None:
-        super().__init__(settings, timeout=max(timeout, 120.0))
+        # Callers that expect a long operation can still request it, while the
+        # direct-detail batch can deliberately use a short transport timeout.
+        # That lets its detached owner reclaim a disconnected MCP session
+        # promptly instead of leaving a worker blocked for minutes.
+        super().__init__(settings, timeout=max(timeout, 5.0))
 
     def _reset_session(self) -> None:
         self.session_id = None
@@ -57,4 +61,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -25,6 +25,11 @@ def settings() -> Settings:
 
 
 class ResilientClientTests(unittest.TestCase):
+    def test_accepts_short_transport_timeout_for_detached_recovery(self) -> None:
+        client = ResilientStreamableHTTPClient(settings(), timeout=20.0)
+
+        self.assertEqual(client.timeout, 20.0)
+
     def test_read_is_retried_with_fresh_session(self) -> None:
         client = ResilientStreamableHTTPClient(settings())
         client.session_id = "old"
@@ -54,4 +59,3 @@ class ResilientClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

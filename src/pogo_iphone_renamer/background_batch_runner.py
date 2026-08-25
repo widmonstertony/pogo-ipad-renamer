@@ -141,6 +141,8 @@ def _is_recoverable_mcp_disconnect(lines: list[str]) -> bool:
             "connection reset",
             "connection aborted",
             "network is unreachable",
+            "no route to host",
+            "urlopen error",
             "remote end closed connection",
             "remotedisconnected",
             "httpx.connecterror",
