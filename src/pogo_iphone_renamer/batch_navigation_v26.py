@@ -417,7 +417,22 @@ def swipe_to_verified_next(
     before: DetailFingerprint | None = None,
 ) -> VerifiedNextDetail:
     previous = before or detail_fingerprint(detail)
-    detail, previous = _stable_baseline(proxy, detail, previous)
+    if previous.name_tokens:
+        detail, previous = _stable_baseline(proxy, detail, previous)
+    else:
+        # A name-free fingerprint is created only immediately after a rename
+        # has been committed and character-for-character verified.  The
+        # nickname may have truncated the species title beyond OCR recovery,
+        # but its pre-rename CP/HP/size fields still identify the current
+        # detail for the purpose of proving a different post-swipe detail.
+        # Re-running the name-dependent baseline here would otherwise wait
+        # forever on a known-good, short nickname before issuing no swipe.
+        base.emit(
+            "status",
+            message=(
+                "已核验短昵称的改名后详情；直接使用改名前不可变字段验证下一次翻页。"
+            ),
+        )
     unchanged_confirmations = 0
     established_direction = getattr(proxy, "_batch_swipe_direction", None)
     if established_direction in {"left", "right"}:

@@ -143,6 +143,30 @@ class DetailFingerprintTests(unittest.TestCase):
         self.assertEqual(next_detail.samples, (second, second, second))
         self.assertEqual(swipe.call_count, 2)
 
+    def test_verified_short_nickname_skips_name_dependent_baseline(self) -> None:
+        before = DetailFingerprint(
+            (), "cp415", "96/96hp", "11.02kg", "0.57m"
+        )
+        after = DetailFingerprint(
+            ("迷你芙",), "cp416", "97/97hp", "11.03kg", "0.57m"
+        )
+        detail = Snapshot("verified short nickname", "detail")
+        next_detail = Snapshot("next detail", "next")
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26._stable_baseline",
+            side_effect=AssertionError("short nickname must not enter baseline OCR wait"),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26._swipe_next_once"
+        ) as swipe, patch(
+            "pogo_iphone_renamer.batch_navigation_v26._observe_after_swipe",
+            return_value=(next_detail, after, True, (next_detail,) * 3),
+        ), patch("pogo_iphone_renamer.batch_navigation_v26.base.emit") as emit:
+            returned = swipe_to_verified_next(object(), detail, before=before)
+
+        self.assertIs(returned.snapshot, next_detail)
+        swipe.assert_called_once()
+        emit.assert_called_once()
+
     def test_never_blindly_retries_when_no_detail_can_be_verified(self) -> None:
         before = DetailFingerprint(
             ("皮卡丘",), "cp500", "60/60hp", "6.0kg", "0.4m"
