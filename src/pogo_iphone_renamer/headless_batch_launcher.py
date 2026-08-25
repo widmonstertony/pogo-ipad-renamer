@@ -18,11 +18,13 @@ from typing import Any, Callable
 from .batch_pause import BatchPauseFile
 from .background_batch_runner import background_run_is_active, request_background_stop
 from .gui import AppSettings, load_settings
+from .live_activity import live_activity_paths
 
 
 def background_environment(root: Path, settings: AppSettings) -> dict[str, str]:
     """Build the same safety configuration as the batch GUI, without Tk."""
 
+    activity_path, preview_path = live_activity_paths(root)
     return {
         "PYTHONPATH": str(root / "src"),
         "PYTHONUTF8": "1",
@@ -40,6 +42,8 @@ def background_environment(root: Path, settings: AppSettings) -> dict[str, str]:
         "POGO_PAUSE_FILE": str(root / ".pogo-data" / "batch.pause"),
         "POGO_BACKGROUND_LOG": str(root / ".pogo-data" / "background-worker.log"),
         "POGO_BATCH_STATE": str(root / ".pogo-data" / "batch-state.json"),
+        "POGO_LIVE_ACTIVITY_PATH": str(activity_path),
+        "POGO_LIVE_PREVIEW_PATH": str(preview_path),
         # A headless continuation must never fall back to the map/inventory
         # entry path or relaunch the game.
         "POGO_START_FROM_CURRENT_DETAIL": "true",

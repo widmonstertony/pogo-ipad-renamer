@@ -16,6 +16,7 @@ from .gui_ipad_landscape import friendly_ipad_landscape_event
 from .gui_ipad_landscape_v6 import collect_deterministic_status
 from .gui_ipad_landscape_v8 import IPadLandscapeRenamerAppV8
 from .gui_native import python_worker_command
+from .live_activity import live_activity_paths
 
 
 def batch_progress_event(line: str) -> dict[str, object] | None:
@@ -53,6 +54,9 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
 
     def _background_log_path(self) -> Path:
         return self.root / ".pogo-data" / "background-worker.log"
+
+    def _live_activity_paths(self) -> tuple[Path, Path]:
+        return live_activity_paths(self.root)
 
     def _build_ui(self) -> None:
         super()._build_ui()
@@ -108,10 +112,138 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self._append_log("截图方向自动兼容：新版 MCP 原生 1366×1024 与旧版旋转帧均可识别。")
         self._append_log("锁屏即安全挂起：即使锁屏截图不是黑色，也会等待你手动解锁后原位继续。")
         self._append_log("批次由独立后台进程持有；Mac 锁屏或关闭窗口后继续运行，结束或停止后恢复电源策略。")
+        self._install_live_monitor()
         self._install_accessible_batch_controls()
         if background_run_is_active(self._batch_state_path()):
             self._set_running(True, True)
             self._append_log("检测到已在后台运行的批量任务；本窗口可查看记录或立即停止。")
+        self.window.after(250, self._refresh_live_monitor)
+
+    def _install_live_monitor(self) -> None:
+        """Add a live, non-interactive mirror of the active iPad work."""
+
+        self.live_run_var = self.tk.StringVar(value="任务：读取后台状态…")
+        self.live_pokemon_var = self.tk.StringVar(value="当前宝可梦：等待详情身份确认")
+        self.live_page_var = self.tk.StringVar(value="当前画面：等待 iPad 截图")
+        self.live_step_var = self.tk.StringVar(value="当前步骤：等待工作进程")
+        self.live_iv_var = self.tk.StringVar(value="IV / 昵称：尚未读取")
+        self.live_updated_var = self.tk.StringVar(value="画面更新时间：尚未收到")
+        self._live_preview_mtime = -1
+        self._live_preview_photo = None
+
+        monitor = self.ttk.Frame(self.log_card, style="Card.TFrame", padding=10)
+        monitor.pack(fill="x", pady=(0, 10), before=self.log)
+        monitor.columnconfigure(1, weight=1)
+        self.live_preview_label = self.tk.Label(
+            monitor,
+            text="等待工作进程\n首张 iPad 画面…",
+            bg="#07101f",
+            fg="#94a3b8",
+            justify="center",
+            width=23,
+            height=12,
+        )
+        self.live_preview_label.grid(row=0, column=0, rowspan=6, sticky="nsw", padx=(0, 14))
+        self.ttk.Label(monitor, text="实时 iPad 画面与操作", style="CardTitle.TLabel").grid(
+            row=0, column=1, sticky="w"
+        )
+        for row, variable in enumerate(
+            (
+                self.live_run_var,
+                self.live_pokemon_var,
+                self.live_page_var,
+                self.live_step_var,
+                self.live_iv_var,
+                self.live_updated_var,
+            ),
+            start=1,
+        ):
+            self.ttk.Label(
+                monitor,
+                textvariable=variable,
+                style="CardText.TLabel",
+                wraplength=610,
+                justify="left",
+            ).grid(row=row, column=1, sticky="w", pady=(3, 0))
+
+    @staticmethod
+    def _read_live_json(path: Path) -> dict[str, object]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _screen_text(value: object) -> str:
+        states = {
+            "DETAIL": "宝可梦详情页",
+            "DETAIL_MENU": "详情菜单",
+            "APPRAISAL": "鉴定页",
+            "APPRAISAL_BARS": "鉴定条页面",
+            "RENAME_DIALOG": "改名输入框",
+            "MAP": "游戏地图",
+            "MAIN_MENU": "精灵球主菜单",
+            "INVENTORY": "宝可梦盒",
+        }
+        raw = str(value or "等待识别")
+        return states.get(raw, raw)
+
+    def _refresh_live_monitor(self) -> None:
+        """Poll only local worker artifacts; this never asks MCP for another frame."""
+
+        activity_path, preview_path = self._live_activity_paths()
+        activity = self._read_live_json(activity_path)
+        state = self._read_live_json(self._batch_state_path())
+        progress = activity.get("progress")
+        if not isinstance(progress, dict):
+            progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+        current = progress.get("current")
+        phase = progress.get("phase")
+        state_text = str(state.get("status", "待机"))
+        position = f"第 {current} 只" if current else "尚未开始"
+        self.live_run_var.set(f"任务：{state_text} · {position} · {phase or '等待下一步'}")
+
+        pokemon = activity.get("pokemon")
+        if isinstance(pokemon, dict):
+            name = str(pokemon.get("name", "等待详情身份确认"))
+            kind = "默认名" if pokemon.get("is_default") else "已有自定义昵称"
+            self.live_pokemon_var.set(f"当前宝可梦：{name}（{kind}）")
+        self.live_page_var.set(f"当前画面：{self._screen_text(activity.get('screen'))}")
+        step = str(activity.get("step", "等待工作进程事件")).strip()
+        self.live_step_var.set(f"当前步骤：{step}")
+
+        iv = activity.get("iv")
+        nickname = str(activity.get("nickname", "")).strip()
+        if isinstance(iv, dict) and all(key in iv for key in ("attack", "defense", "stamina")):
+            summary = f"A/D/S={iv['attack']}/{iv['defense']}/{iv['stamina']}"
+            if iv.get("percent") is not None:
+                summary += f" · IV={iv['percent']}%"
+            if nickname:
+                summary += f" · 目标昵称：{nickname}"
+            self.live_iv_var.set(f"IV / 昵称：{summary}")
+        elif nickname:
+            self.live_iv_var.set(f"IV / 昵称：{nickname}")
+
+        updated = str(activity.get("updated_at", "")).replace("T", " ").replace("+00:00", " UTC")
+        self.live_updated_var.set(f"画面/状态更新时间：{updated or '等待首张截图'}")
+        try:
+            modified = preview_path.stat().st_mtime_ns
+            if modified != self._live_preview_mtime:
+                from PIL import Image, ImageTk
+
+                with Image.open(preview_path) as source:
+                    image = source.copy()
+                image.thumbnail((170, 228), Image.Resampling.LANCZOS)
+                self._live_preview_photo = ImageTk.PhotoImage(image)
+                self.live_preview_label.configure(image=self._live_preview_photo, text="", width=1, height=1)
+                self._live_preview_mtime = modified
+        except OSError:
+            pass
+        try:
+            self.window.after(750, self._refresh_live_monitor)
+        except self.tk.TclError:
+            return
 
     def _append_log(self, message: str) -> None:
         """Show a message in Tk and preserve an inspectable local run record.
@@ -273,6 +405,8 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 "POGO_PAUSE_FILE": str(self.pause_control.path),
                 "POGO_BACKGROUND_LOG": str(self._background_log_path()),
                 "POGO_BATCH_STATE": str(self._batch_state_path()),
+                "POGO_LIVE_ACTIVITY_PATH": str(self._live_activity_paths()[0]),
+                "POGO_LIVE_PREVIEW_PATH": str(self._live_activity_paths()[1]),
                 # The visible app uses the same direct-detail route as the
                 # headless continuation: never leave the user-opened Pokémon
                 # detail page and never relaunch the game after a transient

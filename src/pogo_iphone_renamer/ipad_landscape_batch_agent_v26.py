@@ -46,6 +46,7 @@ from .ipad_landscape_agent_v24 import (
 )
 from .ipad_landscape_agent_v25 import _navigate_with_complete_stale_recovery
 from .landscape_cv_v6 import measure_ipad14_6_appraisal_v6
+from .live_activity import publish_preview
 from .local_ocr import exact_species_from_lines, ocr_mcp_screenshot, rename_dialog_visible
 from .local_ocr_v4 import locate_exact_text_from_mcp
 from .local_ocr_v3 import HP_LINE, NUMBER_TOKEN, NameRegionResult, analyze_name_region
@@ -73,6 +74,13 @@ _UNSAFE_STAGE_MANAGER_GEOMETRY = "detected Stage Manager game-window geometry is
 _DETAIL_IDENTITY_FAST_READ_DELAY_SECONDS = 0.8
 _MEASUREMENT_FAST_READ_DELAY_SECONDS = 0.9
 _CLOSE_APPRAISAL_FAST_READ_DELAY_SECONDS = 1.0
+
+
+def _publish_live_snapshot(snapshot: Snapshot) -> Snapshot:
+    """Refresh the desktop preview from an iPad frame we already captured."""
+
+    publish_preview(snapshot.image)
+    return snapshot
 
 
 def _snapshot_digest(snapshot: Snapshot) -> str:
@@ -738,7 +746,7 @@ def _is_unsafe_stage_manager_geometry(exc: Exception) -> bool:
 def _recover_from_transient_navigation_failure(proxy: SafeProxy) -> Snapshot:
     """Restart only the configured game, then return a fresh game frame."""
 
-    screen_snapshot(proxy)
+    _publish_live_snapshot(screen_snapshot(proxy))
     observation = proxy.observation
     if observation is None:
         raise PolicyViolation("恢复导航前缺少安全观察")
@@ -752,7 +760,7 @@ def _recover_from_transient_navigation_failure(proxy: SafeProxy) -> Snapshot:
         },
     )
     time.sleep(1.5)
-    screen_snapshot(proxy)
+    _publish_live_snapshot(screen_snapshot(proxy))
     observation = proxy.observation
     if observation is None:
         raise PolicyViolation("恢复启动前缺少安全观察")
@@ -841,7 +849,7 @@ def _wait_at_safe_pause_boundary(
     while pause.requested:
         time.sleep(0.25)
 
-    refreshed = screen_snapshot(proxy)
+    refreshed = _publish_live_snapshot(screen_snapshot(proxy))
     base._validate_expected("DETAIL", refreshed)
     resumed_fingerprint = detail_fingerprint(refreshed)
     if fingerprints_differ(fingerprint, resumed_fingerprint):
@@ -1100,6 +1108,13 @@ def _process_one(
         )
         return snapshot, "unreadable"
     snapshot, detail_name = detail_identity
+    emit(
+        "detail",
+        index=index,
+        species=detail_name.species,
+        current_name=_display_name(detail_name),
+        is_default=detail_name.is_default,
+    )
     if not detail_name.is_default or not detail_name.species:
         evidence = " / ".join(detail_name.evidence) or "非完整默认物种名"
         emit(
@@ -1288,15 +1303,18 @@ def run(mode: str, settings: Settings) -> int:
                 active_proxy: SafeProxy, delay: float = 2.5
             ) -> Snapshot:
                 fresh = previous_next_snapshot(active_proxy, delay)
-                return wait_for_unlocked_snapshot(active_proxy, fresh)
+                fresh = wait_for_unlocked_snapshot(active_proxy, fresh)
+                return _publish_live_snapshot(fresh)
 
             # Every downstream module resolves base._next_snapshot at call
             # time.  Installing one device-state gate here makes lock/off
             # recovery consistent during appraisal, rename verification and
             # next-Pokémon swipes, including non-black lock-screen captures.
             base._next_snapshot = device_aware_next_snapshot
-            snapshot = wait_for_capture_channel(
-                proxy, screen_snapshot(proxy), allow_game_restart=False
+            snapshot = _publish_live_snapshot(
+                wait_for_capture_channel(
+                    proxy, screen_snapshot(proxy), allow_game_restart=False
+                )
             )
             if os.getenv("POGO_START_FROM_CURRENT_DETAIL", "").strip().casefold() in {
                 "1",

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from .gui_ipad_landscape import friendly_ipad_landscape_event
+from .live_activity import live_activity_paths, update_live_activity
 from .power_awake import AwakeGuard
 
 
@@ -108,6 +109,16 @@ def _event_progress(line: str) -> dict[str, object] | None:
     return event
 
 
+def _worker_event(line: str) -> dict[str, object] | None:
+    """Return a structured worker event without treating ordinary logs as one."""
+
+    try:
+        event = json.loads(line.strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return event if isinstance(event, dict) and isinstance(event.get("type"), str) else None
+
+
 def _mcp_health_available(health_url: str, *, timeout: float = 3.0) -> bool:
     """Return whether the configured MCP endpoint is ready for a safe worker.
 
@@ -173,6 +184,8 @@ def run_background_batch(
         env.get("POGO_BACKGROUND_LOG", root / ".pogo-data" / "background-worker.log")
     )
     state_path = Path(env.get("POGO_BATCH_STATE", root / ".pogo-data" / "batch-state.json"))
+    activity_path, _preview_path = live_activity_paths(root)
+    activity_path = Path(env.get("POGO_LIVE_ACTIVITY_PATH", activity_path))
     runner_pid = os.getpid()
     stopped = False
     child: Any | None = None
@@ -279,6 +292,9 @@ def run_background_batch(
             if stream is not None:
                 for line in stream:
                     worker_lines.append(line)
+                    event = _worker_event(line)
+                    if event is not None:
+                        update_live_activity(event, path=activity_path)
                     progress = _event_progress(line)
                     if progress is not None:
                         _write_state(
