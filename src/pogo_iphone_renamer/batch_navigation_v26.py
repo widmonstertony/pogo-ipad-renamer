@@ -341,7 +341,11 @@ def _observe_after_swipe(
             # new identity or a subsequent rename.
             continue
         try:
-            current = detail_fingerprint(snapshot)
+            # This proves navigation only.  The subsequent per-Pokémon
+            # identity gate still needs three fresh name reads before it can
+            # appraise or rename anything, so an unreadable custom nickname
+            # must not turn a valid post-swipe detail into an endless wait.
+            current = detail_fingerprint(snapshot, require_name=False)
         except PolicyViolation:
             continue
         if fingerprints_differ(previous, current):
@@ -399,7 +403,10 @@ def _wait_for_post_swipe_identity(
         if not digest or digest in blocked:
             continue
         try:
-            current = detail_fingerprint(snapshot)
+            # See _observe_after_swipe: numeric identity may carry a newly
+            # reached detail through a temporary title-OCR gap, but it never
+            # authorizes a rename on its own.
+            current = detail_fingerprint(snapshot, require_name=False)
         except PolicyViolation:
             continue
         if not fingerprints_differ(previous, current):

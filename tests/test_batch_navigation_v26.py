@@ -428,18 +428,22 @@ class DetailFingerprintTests(unittest.TestCase):
         ), patch(
             "pogo_iphone_renamer.batch_navigation_v26.detail_fingerprint",
             side_effect=[after, after, after],
-        ), patch(
+        ) as fingerprint_reader, patch(
             "pogo_iphone_renamer.batch_navigation_v26._snapshot_digest",
             side_effect=["hash-1", "hash-2", "hash-3"],
         ):
             observed = _observe_after_swipe(object(), before)
 
         self.assertIsNotNone(observed)
-        snapshot, fingerprint, changed, samples = observed
+        snapshot, observed_fingerprint, changed, samples = observed
         self.assertTrue(changed)
         self.assertIs(snapshot, snapshots[-1])
-        self.assertEqual(fingerprint, after)
+        self.assertEqual(observed_fingerprint, after)
         self.assertEqual(samples, tuple(snapshots))
+        self.assertEqual(
+            [call.kwargs for call in fingerprint_reader.call_args_list],
+            [{"require_name": False}] * 3,
+        )
 
     def test_replayed_post_swipe_frame_cannot_count_as_three_new_identities(self) -> None:
         before = DetailFingerprint(
