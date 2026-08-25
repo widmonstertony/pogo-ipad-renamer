@@ -136,6 +136,7 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         log_card = self.log.master
         monitor = self.ttk.Frame(log_card, style="Card.TFrame", padding=10)
         monitor.pack(fill="x", pady=(0, 10), before=self.log)
+        monitor.columnconfigure(0, minsize=184)
         monitor.columnconfigure(1, weight=1)
         self.live_preview_label = self.tk.Label(
             monitor,
@@ -206,6 +207,13 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         state_text = str(state.get("status", "待机"))
         position = f"第 {current} 只" if current else "尚未开始"
         self.live_run_var.set(f"任务：{state_text} · {position} · {phase or '等待下一步'}")
+        if current:
+            counts = (
+                f"改名 {int(progress.get('renamed', 0) or 0)} · "
+                f"已命名跳过 {int(progress.get('skipped', 0) or 0)} · "
+                f"暂不可读保留 {int(progress.get('unreadable', 0) or 0)}"
+            )
+            self.progress_var.set(f"进度：{position} · {phase or '处理中'} · {counts}")
 
         pokemon = activity.get("pokemon")
         if isinstance(pokemon, dict):
