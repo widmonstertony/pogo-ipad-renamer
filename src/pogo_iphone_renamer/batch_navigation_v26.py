@@ -94,7 +94,9 @@ class DetailFingerprint:
         return ("|".join(self.name_tokens), self.cp, self.hp, self.weight, self.height)
 
 
-def detail_fingerprint(snapshot: Snapshot) -> DetailFingerprint:
+def detail_fingerprint(
+    snapshot: Snapshot, *, require_name: bool = True
+) -> DetailFingerprint:
     if not snapshot.image:
         raise PolicyViolation("详情页截图缺失，无法验证翻页身份")
     # Do not route this identity check through local_page_state().  That broad
@@ -147,7 +149,7 @@ def detail_fingerprint(snapshot: Snapshot) -> DetailFingerprint:
             name_tokens = tuple(known_species)
     fingerprint = DetailFingerprint(name_tokens, cp, hp, weight, height)
     numeric_fields = (cp, hp, weight, height)
-    if not name_tokens or not any(numeric_fields):
+    if (require_name and not name_tokens) or not any(numeric_fields):
         raise PolicyViolation("详情页稳定身份字段不足；不会自动翻页")
     return fingerprint
 
@@ -165,7 +167,7 @@ def wait_for_stable_detail_fingerprint(
     proxy: SafeProxy,
     snapshot: Snapshot,
     *,
-    verified_rename_fallback: DetailFingerprint | None = None,
+    verified_navigation_fallback: DetailFingerprint | None = None,
 ) -> tuple[Snapshot, DetailFingerprint]:
     """Read only until a known detail regains enough fields for navigation.
 
@@ -175,37 +177,37 @@ def wait_for_stable_detail_fingerprint(
     same page untouched and wait; an overlay or any other unsafe page still
     raises immediately.
 
-    A just-verified rename can shorten the configured nickname so much that
-    OCR cannot recover the complete species title from the detail header.  In
-    that one case, the caller may pass a name-free fingerprint made from the
-    same Pokemon's *pre-rename*, fully verified detail frame.  Its immutable
-    CP/HP/weight/height fields are enough to prove the following swipe reached
-    a different detail, while the fallback never authorizes a rename itself.
+    A just-verified rename or three-frame-confirmed custom nickname can make
+    the title unavailable to OCR.  In that case, the caller may pass a
+    name-free fingerprint made from the same fully verified detail frame. Its
+    immutable CP/HP/weight/height fields are enough to prove the following
+    swipe reached a different detail, while the fallback never authorizes a
+    rename itself.
     """
 
     try:
         return snapshot, detail_fingerprint(snapshot)
     except PolicyViolation as initial_error:
         if (
-            verified_rename_fallback is not None
+            verified_navigation_fallback is not None
             and "详情页稳定身份字段不足" in str(initial_error)
             and any(
                 (
-                    verified_rename_fallback.cp,
-                    verified_rename_fallback.hp,
-                    verified_rename_fallback.weight,
-                    verified_rename_fallback.height,
+                    verified_navigation_fallback.cp,
+                    verified_navigation_fallback.hp,
+                    verified_navigation_fallback.weight,
+                    verified_navigation_fallback.height,
                 )
             )
         ):
             base.emit(
                 "status",
                 message=(
-                    "改名已逐字核验；新昵称过短，无法从标题 OCR 恢复完整物种名。"
-                    "本次仅使用改名前已确认的 CP/HP/体型字段验证下一次翻页。"
+                    "当前详情已被安全确认，但标题无法由 OCR 读取；"
+                    "本次仅使用已确认的 CP/HP/体型字段验证下一次翻页。"
                 ),
             )
-            return snapshot, verified_rename_fallback
+            return snapshot, verified_navigation_fallback
         if (
             not _persist_post_swipe_wait_enabled()
             or "详情页稳定身份字段不足" not in str(initial_error)

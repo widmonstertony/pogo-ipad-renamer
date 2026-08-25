@@ -102,17 +102,20 @@ def _remember_fresh_frames(proxy: SafeProxy, digests: list[str]) -> None:
         del history[:-_FRESH_FRAME_HISTORY_LIMIT]
 
 
-def _post_rename_navigation_fallback(snapshot: Snapshot) -> DetailFingerprint | None:
-    """Keep only immutable detail fields for a just-verified rename.
+def _name_agnostic_navigation_fingerprint(
+    snapshot: Snapshot,
+) -> DetailFingerprint | None:
+    """Keep only immutable detail fields for an already-confirmed detail.
 
-    This snapshot precedes all appraisal and rename writes.  The helper is
-    deliberately name-free: configured nicknames can truncate a species title,
-    and that title must never be guessed after the write.  The returned values
-    are used only to prove that a later swipe changed detail pages.
+    The helper is deliberately name-free: configured nicknames can truncate a
+    species title, and custom names must never be guessed.  Its caller may use
+    the result only after either a committed-and-verified rename or a
+    three-frame custom-name skip.  The returned values prove that a later
+    swipe changed detail pages; they can never authorize a rename.
     """
 
     try:
-        fingerprint = detail_fingerprint(snapshot)
+        fingerprint = detail_fingerprint(snapshot, require_name=False)
     except PolicyViolation:
         return None
     fallback = DetailFingerprint(
@@ -1362,9 +1365,11 @@ def run(mode: str, settings: Settings) -> int:
                     seed_samples = identity_seed_samples
                     identity_seed_samples = ()
                     # This pre-write snapshot is already the current verified
-                    # detail.  It is passed on only after a later rename was
-                    # fully committed and character-for-character checked.
-                    pre_rename_navigation_fallback = _post_rename_navigation_fallback(
+                    # detail.  It can be used only after a later rename was
+                    # fully committed and character-for-character checked;
+                    # a confirmed custom-name skip builds its fallback from
+                    # its own three-frame-confirmed detail instead.
+                    pre_navigation_fallback = _name_agnostic_navigation_fingerprint(
                         snapshot
                     )
                     detail, outcome = _process_one(
@@ -1378,10 +1383,14 @@ def run(mode: str, settings: Settings) -> int:
                     detail, fingerprint = wait_for_stable_detail_fingerprint(
                         proxy,
                         detail,
-                        verified_rename_fallback=(
-                            pre_rename_navigation_fallback
+                        verified_navigation_fallback=(
+                            pre_navigation_fallback
                             if outcome == "renamed"
-                            else None
+                            else (
+                                _name_agnostic_navigation_fingerprint(detail)
+                                if outcome == "skipped"
+                                else None
+                            )
                         ),
                     )
                     _remember_fresh_frames(proxy, [_snapshot_digest(detail)])

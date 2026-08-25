@@ -23,6 +23,35 @@ from pogo_iphone_renamer.batch_navigation_v26 import (
 
 
 class DetailFingerprintTests(unittest.TestCase):
+    def test_name_free_fingerprint_keeps_numeric_identity_for_confirmed_nickname(self) -> None:
+        """Only an explicit navigation fallback may omit an unreadable title."""
+
+        snapshot = Snapshot("CP 500 60/60 HP 6.0 kg 0.4 m", "detail")
+        unreadable_name = SimpleNamespace(evidence=())
+        full_lines = (
+            SimpleNamespace(text="CP500", confidence=0.99),
+            SimpleNamespace(text="60/60HP", confidence=0.99),
+            SimpleNamespace(text="6.0kg", confidence=0.99),
+            SimpleNamespace(text="0.4m", confidence=0.99),
+        )
+        with patch(
+            "pogo_iphone_renamer.batch_navigation_v26.measure_ipad14_6_appraisal",
+            side_effect=ValueError("plain detail"),
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.analyze_name_region",
+            return_value=unreadable_name,
+        ), patch(
+            "pogo_iphone_renamer.batch_navigation_v26.ocr_mcp_screenshot",
+            return_value=full_lines,
+        ):
+            with self.assertRaises(PolicyViolation):
+                detail_fingerprint(snapshot)
+            fingerprint = detail_fingerprint(snapshot, require_name=False)
+
+        self.assertEqual(fingerprint.name_tokens, ())
+        self.assertEqual(fingerprint.cp, "cp500")
+        self.assertEqual(fingerprint.hp, "60/60hp")
+
     def test_full_frame_species_recovers_identity_when_name_crop_only_reads_hp(self) -> None:
         snapshot = Snapshot("CP 500 60/60 HP 6.0 kg", "detail")
         cropped_name = SimpleNamespace(evidence=("60/60 HP",))
@@ -272,7 +301,7 @@ class DetailFingerprintTests(unittest.TestCase):
         next_snapshot.assert_called_once_with(unittest.mock.ANY, 3.0)
         emit.assert_called_once()
 
-    def test_verified_rename_uses_pre_rename_immutable_fallback(self) -> None:
+    def test_verified_detail_uses_name_free_navigation_fallback(self) -> None:
         fallback = DetailFingerprint(
             (), "cp500", "60/60hp", "6.0kg", "0.4m"
         )
@@ -288,7 +317,7 @@ class DetailFingerprintTests(unittest.TestCase):
             snapshot, returned = wait_for_stable_detail_fingerprint(
                 object(),
                 short_nickname_detail,
-                verified_rename_fallback=fallback,
+                verified_navigation_fallback=fallback,
             )
 
         self.assertIs(snapshot, short_nickname_detail)

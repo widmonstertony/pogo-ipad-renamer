@@ -34,7 +34,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
     _process_one,
-    _post_rename_navigation_fallback,
+    _name_agnostic_navigation_fingerprint,
     _proven_default_name_in_rename_dialog,
     _resume_verified_unsubmitted_rename,
     _wait_for_direct_detail_after_task_switcher,
@@ -84,7 +84,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         next_snapshot.assert_called_once_with(ANY, 3.0)
         self.assertIn("只读等待", emit.call_args.kwargs["message"])
 
-    def test_post_rename_navigation_fallback_removes_nickname(self) -> None:
+    def test_name_agnostic_navigation_fingerprint_removes_nickname(self) -> None:
         before = DetailFingerprint(
             ("迷你芙",), "cp415", "96/96hp", "11.02kg", "0.57m"
         )
@@ -92,7 +92,7 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.detail_fingerprint",
             return_value=before,
         ):
-            fallback = _post_rename_navigation_fallback(
+            fallback = _name_agnostic_navigation_fingerprint(
                 Snapshot("before", "before-image")
             )
 
