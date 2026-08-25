@@ -247,7 +247,11 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                     image = source.copy()
                 image.thumbnail((170, 228), Image.Resampling.LANCZOS)
                 self._live_preview_photo = ImageTk.PhotoImage(image)
-                self.live_preview_label.configure(image=self._live_preview_photo, text="", width=1, height=1)
+                # Reset the text-placeholder geometry.  A non-zero Tk label
+                # width/height clips an image to that character-cell size.
+                self.live_preview_label.configure(
+                    image=self._live_preview_photo, text="", width=0, height=0
+                )
                 self._live_preview_mtime = modified
         except OSError:
             pass
