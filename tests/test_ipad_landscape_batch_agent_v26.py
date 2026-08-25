@@ -29,6 +29,7 @@ from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
     _current_detail_only,
     _last_unsubmitted_journal_nickname,
     _restore_direct_detail_after_interrupted_appraisal,
+    _wait_for_direct_stage_geometry,
     _is_recoverable_navigation_failure,
     _is_unsafe_stage_manager_geometry,
     _navigate_from_current_detail_only,
@@ -57,6 +58,32 @@ def _default_name(species: str = "可達鴨") -> NameRegionResult:
 
 
 class BatchUnreadableAppraisalTests(unittest.TestCase):
+    def test_direct_geometry_waits_read_only_after_stage_manager_redraw(self) -> None:
+        appraisal = Snapshot("", "appraisal")
+        recovered = Snapshot("", "recovered")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._ensure_stage_geometry_for_state",
+            side_effect=[
+                PolicyViolation("当前截图未能安全定位 Stage Manager 中的 Pokémon GO 窗口；未执行触控"),
+                recovered,
+            ],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base._next_snapshot",
+            return_value=appraisal,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
+            return_value="APPRAISAL_BARS",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.emit"
+        ) as emit:
+            returned = _wait_for_direct_stage_geometry(
+                object(), appraisal, "APPRAISAL_BARS"
+            )
+
+        self.assertIs(returned, recovered)
+        next_snapshot.assert_called_once_with(ANY, 3.0)
+        self.assertIn("只读等待", emit.call_args.kwargs["message"])
+
     def test_post_rename_navigation_fallback_removes_nickname(self) -> None:
         before = DetailFingerprint(
             ("迷你芙",), "cp415", "96/96hp", "11.02kg", "0.57m"
@@ -378,6 +405,9 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
             return_value="APPRAISAL_BARS",
         ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._wait_for_direct_stage_geometry",
+            return_value=appraisal,
+        ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._close_appraisal",
             return_value=detail,
         ) as close, patch(
@@ -399,6 +429,9 @@ class BatchUnreadableAppraisalTests(unittest.TestCase):
         with patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26.base.local_page_state",
             return_value="APPRAISAL_DIALOG",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._wait_for_direct_stage_geometry",
+            return_value=dialogue,
         ), patch(
             "pogo_iphone_renamer.ipad_landscape_batch_agent_v26._navigate_with_read_only_measurement_retry",
             return_value=(appraisal, object()),

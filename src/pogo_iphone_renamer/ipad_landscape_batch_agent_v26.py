@@ -303,11 +303,53 @@ def _current_detail_only(snapshot: Snapshot) -> bool:
     return True
 
 
+def _wait_for_direct_stage_geometry(
+    proxy: SafeProxy, snapshot: Snapshot, expected_state: str
+) -> Snapshot:
+    """Read only until the current direct-detail surface is touch-calibrated.
+
+    A reconnect can capture the same appraisal overlay while Stage Manager is
+    still redrawing the surrounding card edges.  That is not a reason to leave
+    the user's Pokémon detail page.  Keep observing the exact same state and
+    permit a close/tap only after the calibrated geometry is available again.
+    """
+
+    waiting_reported = False
+    while True:
+        try:
+            return base._ensure_stage_geometry_for_state(
+                proxy, snapshot, expected_state
+            )
+        except PolicyViolation as exc:
+            if "当前截图未能安全定位 Stage Manager" not in str(exc):
+                raise
+            if not waiting_reported:
+                emit(
+                    "status",
+                    message=(
+                        "Stage Manager 正在重绘 Pokémon GO 窗口边界；"
+                        "后台只读等待重新标定，不会点击、结束任务或重开游戏。"
+                    ),
+                )
+                waiting_reported = True
+            candidate = base._next_snapshot(proxy, 3.0)
+            if base.local_page_state(candidate) != expected_state:
+                # The caller will re-evaluate the newly observed page before
+                # it considers any write.  Returning it is safer than closing
+                # an overlay whose visual state has changed during redraw.
+                return candidate
+            snapshot = candidate
+
+
 def _restore_direct_detail_after_interrupted_appraisal(
     proxy: SafeProxy, snapshot: Snapshot
 ) -> Snapshot:
     """Close only a proven appraisal overlay before a direct-detail resume."""
 
+    state = base.local_page_state(snapshot)
+    if state not in {"APPRAISAL_DIALOG", "APPRAISAL_BARS"}:
+        return snapshot
+    snapshot = _wait_for_direct_stage_geometry(proxy, snapshot, state)
     state = base.local_page_state(snapshot)
     if state not in {"APPRAISAL_DIALOG", "APPRAISAL_BARS"}:
         return snapshot
