@@ -273,6 +273,12 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 "POGO_PAUSE_FILE": str(self.pause_control.path),
                 "POGO_BACKGROUND_LOG": str(self._background_log_path()),
                 "POGO_BATCH_STATE": str(self._batch_state_path()),
+                # The visible app uses the same direct-detail route as the
+                # headless continuation: never leave the user-opened Pokémon
+                # detail page and never relaunch the game after a transient
+                # MCP interruption.
+                "POGO_START_FROM_CURRENT_DETAIL": "true",
+                "POGO_ALLOW_GAME_RESTART": "false",
                 "POGO_PERSIST_CAPTURE_WAIT": "true",
                 }
             )
