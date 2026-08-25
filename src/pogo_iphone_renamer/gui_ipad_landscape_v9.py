@@ -131,7 +131,10 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self._live_preview_mtime = -1
         self._live_preview_photo = None
 
-        monitor = self.ttk.Frame(self.log_card, style="Card.TFrame", padding=10)
+        # ``gui.RenamerApp`` intentionally keeps its log card local; the
+        # existing Text widget is the stable public handle to that container.
+        log_card = self.log.master
+        monitor = self.ttk.Frame(log_card, style="Card.TFrame", padding=10)
         monitor.pack(fill="x", pady=(0, 10), before=self.log)
         monitor.columnconfigure(1, weight=1)
         self.live_preview_label = self.tk.Label(
