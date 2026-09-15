@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from pogo_iphone_renamer import ipad_landscape_agent as base
+from pogo_iphone_renamer import device_controller as base
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.policy import PolicyViolation
 
@@ -13,7 +13,7 @@ class AppraisalMenuResponseTests(unittest.TestCase):
         for orientation in ("STAGE_MANAGER_MAXIMIZED", "STAGE_MANAGER_PORTRAIT_WINDOW", "PORTRAIT_FULLSCREEN"):
             proxy = SimpleNamespace(observation=SimpleNamespace(width=1366, height=1024, token="fresh"))
             with self.subTest(orientation=orientation), patch.object(base, "ORIENTATION", orientation), patch(
-                "pogo_iphone_renamer.rename_controls_v20.tap_ocr_control"
+                "pogo_iphone_renamer.rename_controls.tap_ocr_control"
             ) as tap:
                 base._tap(proxy, "DETAIL_MENU")
                 tap.assert_called_once()

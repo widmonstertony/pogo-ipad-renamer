@@ -32,13 +32,13 @@ IV 昵称；已有自定义/IV 昵称原样保留并自动继续下一只。
 当前机器可双击：
 
 ```text
-release\启动-PokemonGO-整理助手-v26.cmd
+启动 Pokémon GO 整理助手.cmd
 ```
 
 开发方式：安装 Python 3.11+，执行 `python -m pip install -e .`，然后运行：
 
 ```powershell
-python launcher_ipad_landscape_v9.py
+python launch_desktop.py
 ```
 
 ## macOS 启动
@@ -82,6 +82,21 @@ macOS：
 ```bash
 PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s tests
 ```
+
+## 代码结构
+
+- `macos/`：原生 SwiftUI 界面、应用图标与 bundle 配置。
+- `src/pogo_iphone_renamer/batch_agent.py`：批处理状态机，只协调各职责模块。
+- `batch_navigation.py`、`game_navigation.py`：详情翻页与页面导航验证。
+- `name_recognition.py`、`text_localization.py`：名称分类和文字坐标识别。
+- `appraisal_*.py`：鉴定条定位、解码、校准和稳定帧复核。
+- `rename_*.py`、`name_input.py`：改名弹窗、输入核验、提交与恢复。
+- `device_controller.py`、`device_recovery.py`：安全触控映射、锁屏及截图恢复。
+- `legacy_gui*.py`：Windows 兼容桌面界面；macOS 不使用这些模块。
+- `tests/`：与生产模块同名的回归测试。
+
+历史实验脚本和按版本号堆叠的实现已移除；版本历史由 Git 保存，不再通过
+`_v2`、`_v26` 之类的文件名维护。
 
 ## 隐私与恢复
 

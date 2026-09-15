@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from pogo_iphone_renamer import ipad_landscape_agent_v22 as agent
+from pogo_iphone_renamer import rename_submission as agent
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from pogo_iphone_renamer.headless_batch_launcher import background_environment
 from pogo_iphone_renamer.gui import load_settings
 from pogo_iphone_renamer.config import Settings
-from pogo_iphone_renamer.native_agent_v2 import ResilientStreamableHTTPClient
+from pogo_iphone_renamer.resilient_mcp import ResilientStreamableHTTPClient
 from pogo_iphone_renamer.server import SafeProxy
 from pogo_iphone_renamer.protocol import text_from_content
 from pogo_iphone_renamer.appraisal_agent import screen_snapshot
@@ -27,8 +27,8 @@ if snapshot.image:
     destination.write_bytes(base64.b64decode(snapshot.image))
     print(destination, flush=True)
 if '--open-menu' in sys.argv:
-    from pogo_iphone_renamer import ipad_landscape_agent as base
-    from pogo_iphone_renamer.local_ocr_v3 import analyze_name_region
+    from pogo_iphone_renamer import device_controller as base
+    from pogo_iphone_renamer.name_recognition import analyze_name_region
     base.ORIENTATION = 'STAGE_MANAGER_PORTRAIT_WINDOW'
     state = base.local_page_state(snapshot)
     name = analyze_name_region(snapshot.image, base.ORIENTATION)

@@ -20,7 +20,7 @@ from pogo_iphone_renamer.config import Settings  # noqa: E402
 from pogo_iphone_renamer.landscape_cv import rotate_mcp_image_upright  # noqa: E402
 from pogo_iphone_renamer.local_ocr import _engine  # noqa: E402
 from pogo_iphone_renamer.native_agent import tool_result_message  # noqa: E402
-from pogo_iphone_renamer.native_agent_v2 import (  # noqa: E402
+from pogo_iphone_renamer.resilient_mcp import (  # noqa: E402
     ResilientStreamableHTTPClient,
 )
 

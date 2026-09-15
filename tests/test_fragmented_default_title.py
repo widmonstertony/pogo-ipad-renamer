@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from PIL import Image
-from pogo_iphone_renamer import local_ocr_v3 as ocr
+from pogo_iphone_renamer import name_recognition as ocr
 from pogo_iphone_renamer.local_ocr import OCRLine
 
 

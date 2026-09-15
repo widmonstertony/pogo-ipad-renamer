@@ -22,7 +22,7 @@ from .background_batch_runner import background_run_is_active, request_backgroun
 from .config import Settings
 from .gui import AppSettings, load_settings
 from .live_activity import live_activity_paths, publish_preview, update_live_activity
-from .native_agent_v2 import ResilientStreamableHTTPClient
+from .resilient_mcp import ResilientStreamableHTTPClient
 from .protocol import text_from_content
 from .server import SafeProxy
 

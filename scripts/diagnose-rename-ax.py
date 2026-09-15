@@ -8,24 +8,24 @@ import json
 import os
 from pathlib import Path
 
-from pogo_iphone_renamer import ipad_landscape_agent as base
+from pogo_iphone_renamer import device_controller as base
 from pogo_iphone_renamer.appraisal_agent import screen_snapshot
 from pogo_iphone_renamer.background_batch_runner import background_run_is_active
 from pogo_iphone_renamer.config import Settings
 from pogo_iphone_renamer.device_run_lock import DeviceRunLock
 from pogo_iphone_renamer.gui import load_settings
 from pogo_iphone_renamer.headless_batch_launcher import background_environment
-from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import (
+from pogo_iphone_renamer.batch_agent import (
     _confirm_fresh_detail_identity, _restore_direct_detail_after_interrupted_appraisal,
 )
-from pogo_iphone_renamer.ipad_landscape_agent_v16 import open_dynamic_rename_from_detail
-from pogo_iphone_renamer.ipad_landscape_agent_v22 import (
+from pogo_iphone_renamer.rename_dialog import open_dynamic_rename_from_detail
+from pogo_iphone_renamer.rename_submission import (
     _focus_ocr_default_name_field, _cancel_unverified_input, RenameFieldVerificationUnavailable,
     AccessibilityRuntimeUnavailable, _ax_runtime_is_inactive,
 )
-from pogo_iphone_renamer.ipad_landscape_agent_v5 import exact_name_field
+from pogo_iphone_renamer.accessibility_names import exact_name_field
 from pogo_iphone_renamer.appraisal_agent import Snapshot
-from pogo_iphone_renamer.native_agent_v2 import ResilientStreamableHTTPClient
+from pogo_iphone_renamer.resilient_mcp import ResilientStreamableHTTPClient
 from pogo_iphone_renamer.protocol import text_from_content
 from pogo_iphone_renamer.server import SafeProxy
 

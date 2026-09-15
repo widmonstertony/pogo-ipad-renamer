@@ -5,12 +5,12 @@ import base64
 import time
 from pathlib import Path
 
-from pogo_iphone_renamer import ipad_landscape_agent as base
+from pogo_iphone_renamer import device_controller as base
 from pogo_iphone_renamer.appraisal_agent import screen_snapshot
 from pogo_iphone_renamer.config import Settings
 from pogo_iphone_renamer.device_run_lock import DeviceRunLock
-from pogo_iphone_renamer.ipad_landscape_agent_v14 import robust_page_state
-from pogo_iphone_renamer.native_agent_v2 import ResilientStreamableHTTPClient
+from pogo_iphone_renamer.game_navigation import robust_page_state
+from pogo_iphone_renamer.resilient_mcp import ResilientStreamableHTTPClient
 from pogo_iphone_renamer.server import SafeProxy
 
 

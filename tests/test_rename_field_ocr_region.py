@@ -1,15 +1,15 @@
 import unittest
 from unittest.mock import patch
 from PIL import Image
-from pogo_iphone_renamer.local_ocr_v4 import OCRTextBox, locate_exact_text_from_mcp
+from pogo_iphone_renamer.text_localization import OCRTextBox, locate_exact_text_from_mcp
 from pogo_iphone_renamer.policy import PolicyViolation
 
 
 class RenameFieldRegionTests(unittest.TestCase):
     def locate(self, boxes):
-        with patch('pogo_iphone_renamer.local_ocr_v4.rotate_mcp_image_upright',
+        with patch('pogo_iphone_renamer.text_localization.rotate_mcp_image_upright',
                    return_value=Image.new('RGB', (1000, 1000))), patch(
-                   'pogo_iphone_renamer.local_ocr_v4.ocr_text_boxes',
+                   'pogo_iphone_renamer.text_localization.ocr_text_boxes',
                    side_effect=[boxes, (), ()]):
             return locate_exact_text_from_mcp('image', 'profile', '噴嚏熊',
                                              search_region=(.1, .3, .7, .55))
@@ -33,10 +33,10 @@ class RenameFieldRegionTests(unittest.TestCase):
         enlarged_exact = OCRTextBox('保母蟲', .99, 140, 180, 420, 250)
         enlarged_exact_again = OCRTextBox('保母蟲', .98, 210, 270, 630, 375)
         with patch(
-            'pogo_iphone_renamer.local_ocr_v4.rotate_mcp_image_upright',
+            'pogo_iphone_renamer.text_localization.rotate_mcp_image_upright',
             return_value=Image.new('RGB', (1000, 1000)),
         ), patch(
-            'pogo_iphone_renamer.local_ocr_v4.ocr_text_boxes',
+            'pogo_iphone_renamer.text_localization.ocr_text_boxes',
             side_effect=[(simplified,), (enlarged_exact,), (enlarged_exact_again,)],
         ):
             located = locate_exact_text_from_mcp(

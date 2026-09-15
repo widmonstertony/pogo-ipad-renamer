@@ -16,7 +16,7 @@ try {
         --distpath $releaseRoot `
         --workpath $buildRoot `
         --specpath $buildRoot `
-        (Join-Path $projectRoot "launcher_ipad_landscape.py")
+        (Join-Path $projectRoot "launch_desktop.py")
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller build failed with exit code $LASTEXITCODE"
     }

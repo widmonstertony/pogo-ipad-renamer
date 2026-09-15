@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from pogo_iphone_renamer import ipad_landscape_agent_v20 as agent
+from pogo_iphone_renamer import field_verification as agent
 
 
 class CompleteFieldTreeTests(unittest.TestCase):

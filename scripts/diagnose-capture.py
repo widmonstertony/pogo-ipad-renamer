@@ -9,7 +9,7 @@ from PIL import Image
 
 from pogo_iphone_renamer.config import Settings
 from pogo_iphone_renamer.native_agent import tool_result_message
-from pogo_iphone_renamer.native_agent_v2 import ResilientStreamableHTTPClient
+from pogo_iphone_renamer.resilient_mcp import ResilientStreamableHTTPClient
 
 
 def main() -> int:

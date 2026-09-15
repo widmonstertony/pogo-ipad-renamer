@@ -11,11 +11,11 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or [])
     if sys.platform != "darwin":
-        from .gui_ipad_landscape_v9 import main as tkinter_main
+        from .legacy_gui import main as tkinter_main
 
         return tkinter_main(argv)
     if "--self-check" in argv:
-        from .gui_ipad_landscape_v9 import main as tkinter_main
+        from .legacy_gui import main as tkinter_main
 
         return tkinter_main(["--self-check"])
 

@@ -12,7 +12,7 @@ from typing import Any
 
 from .config import Settings
 from .native_agent import emit, tool_result_message
-from .native_agent_v2 import ResilientStreamableHTTPClient
+from .resilient_mcp import ResilientStreamableHTTPClient
 from .nickname import generate_iv_nickname, iv_percent
 from .policy import PolicyViolation
 from .server import SafeProxy

@@ -6,10 +6,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from pogo_iphone_renamer.ipad_landscape_agent import ANCHORS
-from pogo_iphone_renamer import ipad_landscape_agent as base
+from pogo_iphone_renamer.device_controller import ANCHORS
+from pogo_iphone_renamer import device_controller as base
 from pogo_iphone_renamer.appraisal_agent import Snapshot
-from pogo_iphone_renamer.ipad_landscape_agent_v14 import robust_page_state
+from pogo_iphone_renamer.game_navigation import robust_page_state
 from pogo_iphone_renamer.landscape_cv import (
     stage_manager_geometry,
     stage_manager_upright_ratio_to_touch,

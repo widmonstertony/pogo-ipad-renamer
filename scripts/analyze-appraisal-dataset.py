@@ -6,9 +6,9 @@ from pathlib import Path
 from PIL import Image
 
 from pogo_iphone_renamer.landscape_cv import _is_attack_fill, _is_gold_fill
-from pogo_iphone_renamer.landscape_cv_v3 import _endpoint_value
-from pogo_iphone_renamer.landscape_cv_v4 import _select_track_rows
-from pogo_iphone_renamer.landscape_cv_v5 import _row_consensus_endpoint
+from pogo_iphone_renamer.appraisal_scale import _endpoint_value
+from pogo_iphone_renamer.appraisal_rows import _select_track_rows
+from pogo_iphone_renamer.appraisal_decoder import _row_consensus_endpoint
 
 
 def _runs(values: list[int]) -> list[tuple[int, int]]:

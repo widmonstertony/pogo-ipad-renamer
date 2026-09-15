@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from pogo_iphone_renamer import local_ocr_v3 as names
-from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import _detail_name_key
+from pogo_iphone_renamer import name_recognition as names
+from pogo_iphone_renamer.batch_agent import _detail_name_key
 from pogo_iphone_renamer.local_ocr import OCRLine
 
 

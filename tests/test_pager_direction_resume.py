@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pogo_iphone_renamer.ipad_landscape_batch_agent_v26 import _load_pager_direction, _save_pager_direction
+from pogo_iphone_renamer.batch_agent import _load_pager_direction, _save_pager_direction
 
 
 class PagerDirectionResumeTests(unittest.TestCase):

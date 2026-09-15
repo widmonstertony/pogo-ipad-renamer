@@ -10,6 +10,6 @@ def main(argv: list[str] | None = None) -> int:
         from .macos_launcher import main as macos_main
 
         return macos_main(argv)
-    from .gui_ipad_landscape_v9 import main as tkinter_main
+    from .legacy_gui import main as tkinter_main
 
     return tkinter_main(argv)

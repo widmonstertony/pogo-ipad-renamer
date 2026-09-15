@@ -1,9 +1,9 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from pogo_iphone_renamer import ipad_landscape_batch_agent_v26 as batch
+from pogo_iphone_renamer import batch_agent as batch
 from pogo_iphone_renamer.appraisal_agent import Snapshot
-from pogo_iphone_renamer.local_ocr_v3 import NameRegionResult
+from pogo_iphone_renamer.name_recognition import NameRegionResult
 
 
 class CustomSeedSpeedTests(unittest.TestCase):

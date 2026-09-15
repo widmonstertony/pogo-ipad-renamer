@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from .gui_ipad_landscape import friendly_ipad_landscape_event
+from .legacy_gui_base import friendly_ipad_landscape_event
 from .live_activity import live_activity_paths, update_live_activity
 from .power_awake import AwakeGuard
 
@@ -79,7 +79,7 @@ def worker_command(mode: str) -> list[str]:
         sys.executable,
         "-u",
         "-m",
-        "pogo_iphone_renamer.ipad_landscape_batch_agent_v26",
+        "pogo_iphone_renamer.batch_agent",
         "--mode",
         mode,
     ]

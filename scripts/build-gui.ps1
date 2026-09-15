@@ -12,7 +12,7 @@ try {
         --distpath (Join-Path $projectRoot "release") `
         --workpath (Join-Path $projectRoot "build\gui") `
         --specpath (Join-Path $projectRoot "build\gui") `
-        (Join-Path $projectRoot "launcher.py")
+        (Join-Path $projectRoot "launch_desktop.py")
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller build failed with exit code $LASTEXITCODE"
     }
@@ -20,4 +20,3 @@ try {
 finally {
     Pop-Location
 }
-
