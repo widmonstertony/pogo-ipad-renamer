@@ -4,11 +4,13 @@ import base64
 import hashlib
 import os
 import re
+import time
 from dataclasses import dataclass
 
 from . import ipad_landscape_agent as base
 from .appraisal_agent import Snapshot
 from .landscape_cv_calibrated import measure_ipad14_6_appraisal
+from .landscape_cv import rotate_mcp_image_upright
 from .local_ocr import ocr_mcp_screenshot
 from .local_ocr_v3 import analyze_name_region
 from .policy import PolicyViolation
@@ -28,6 +30,15 @@ class NoNextPokemon(PolicyViolation):
 
 class VerifiedEndOfStorage(NoNextPokemon):
     """Four swipes remained on the same verified plain-detail identity."""
+
+
+class DetailExitedToOverview(NoNextPokemon):
+    """A verified detail swipe visibly returned to a game overview page."""
+
+    def __init__(self, snapshot: Snapshot, state: str) -> None:
+        super().__init__(f"横向翻页后离开详情页：{state}")
+        self.snapshot = snapshot
+        self.state = state
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,54 @@ FAST_OBSERVATION_DELAY_SECONDS = 0.6
 CHANGED_IDENTITY_CONFIRMATIONS = 3
 BASELINE_OBSERVATIONS = 5
 BASELINE_CONFIRMATIONS = 2
+# A screenshot stream may briefly produce featureless/old frames, but an
+# unlimited read loop makes the desktop indistinguishable from a frozen task.
+# The caller retries a bounded observation cycle with a fresh read session;
+# it never sends a blind extra gesture while a cycle is unresolved.
+MAX_PERSISTENT_READ_ONLY_ATTEMPTS = 12
+# All lanes are inside the *upper Pokémon artwork*, not the white information
+# sheet.  On the current iPad7,2 Stage Manager capture, the previous 0.40
+# lane lands exactly on the sheet's top edge.  Pokémon GO interprets that
+# drag as dismissing the detail rather than its left/right pager.  These lanes
+# deliberately stay clear of the top ellipsis and star/camera controls too.
+SAFE_PAGER_Y_RATIOS = (0.28, 0.25, 0.31, 0.34)
+# A page swipe is a short, ordinary finger gesture.  The longer 650 ms motion
+# was reliably accepted by MCP but was consumed by the sheet/Stage Manager
+# gesture recognizer before Pokémon GO could page.
+PAGER_SWIPE_DURATION_MS = 320
+PAGER_SWIPE_STEPS = 20
+# Pokémon GO's detail pager places the following storage item to the visual
+# right of the current card. A finger swipe from visual right to left reveals
+# it. Merely seeing a different identity cannot establish direction: the
+# opposite gesture also changes identity, but walks to the previous item.
+NEXT_PAGER_DIRECTION = "left"
+
+
+def _emit_read_only_wait(
+    *,
+    stage: str,
+    reason: str,
+    attempt: int,
+    started_at: float,
+    next_action: str,
+) -> None:
+    """Publish a live explanation for a deliberately non-interactive wait.
+
+    Screenshot/OCR recovery can take longer than the visible animation.  The
+    worker must not turn that into a blind extra swipe, but the desktop must
+    also not look frozen while it is collecting proof.  This event is local
+    telemetry only; it never adds an MCP request or changes the iPad.
+    """
+
+    base.emit(
+        "waiting",
+        stage=stage,
+        reason=reason,
+        attempt=attempt,
+        elapsed_seconds=max(0, int(time.monotonic() - started_at)),
+        next_action=next_action,
+        user_action="无需操作；此时没有足够证据安全点击，后台只读等待。",
+    )
 
 
 def _persist_post_swipe_wait_enabled() -> bool:
@@ -77,9 +136,119 @@ def _snapshot_digest(snapshot: Snapshot) -> str:
         return ""
 
 
+def _detail_card_visual_signature(snapshot: Snapshot) -> str:
+    """Return a compact, non-authorizing signature of the detail text card.
+
+    Pokémon models and weather/shiny particles animate continuously, which
+    makes a whole-screenshot digest unsuitable for pager confirmation. The
+    title/HP/size card is stable by contrast. This signature is used only to
+    tell whether the card visibly changed after a swipe; a later, independent
+    three-frame title OCR gate remains mandatory before appraisal or rename.
+    """
+
+    if not snapshot.image:
+        return ""
+    try:
+        image = rotate_mcp_image_upright(snapshot.image, base.ORIENTATION)
+        width, height = image.size
+        # Exclude the moving model, background leaves and action buttons.
+        card = image.crop(
+            (
+                round(width * 0.20),
+                round(height * 0.48),
+                round(width * 0.80),
+                round(height * 0.69),
+            )
+        ).convert("L").resize((24, 12))
+        # Thirty-two luminance levels over deliberately coarse cells retain
+        # the title/stat layout while tolerating JPEG compression, subpixel
+        # antialiasing and the animated particle layer outside this crop.
+        values = bytes(pixel >> 5 for pixel in card.getdata())
+    except Exception:
+        return ""
+    return hashlib.sha256(values).hexdigest()
+
+
+def _independent_read_key(snapshot: Snapshot, digest: str) -> str:
+    """Distinguish actual repeated reads from test fixtures or reused data.
+
+    iPadOS can encode a stable detail page into byte-identical JPEGs.  A
+    different post-swipe digest still proves it is not the previously verified
+    Pokémon; subsequent reads are independent because screen_snapshot issued
+    a new MCP screenshot request, even when the pixels do not animate.
+    Fixtures and manually reused snapshots have no capture id and remain
+    deduplicated by pixel digest.
+    """
+
+    return f"capture:{snapshot.capture_id}" if snapshot.capture_id else f"pixel:{digest}"
+
+
 def _blocked_frame_hashes(proxy: SafeProxy) -> set[str]:
     history = getattr(proxy, "_pogo_verified_frame_history", None)
     return set(history) if isinstance(history, list) else set()
+
+
+def _overview_state(snapshot: Snapshot) -> str | None:
+    """Recognize a *pixel-proven* game overview before entering a wait.
+
+    On iPad7,2 the MCP accessibility tree can retain an INVENTORY/MAP label
+    for one or more fresh screenshots after a detail pager swipe.  That text
+    must never overrule a visible Pokémon detail card: it previously made the
+    worker reopen an inventory card even when the raw detail pixels (and CP)
+    had already changed.
+    """
+
+    try:
+        state = base.local_page_state(snapshot)
+    except Exception:
+        return None
+    if state not in {"MAP", "MAIN_MENU", "INVENTORY"}:
+        return None
+    # ``local_page_state`` is intentionally conservative and falls back to
+    # MAP whenever local OCR is momentarily empty.  A detail-card visual
+    # signature is stronger evidence than that fallback, but is used only to
+    # suppress an erroneous exit classification; it never authorizes rename
+    # or navigation by itself.
+    if _looks_like_detail_visual(snapshot):
+        return None
+    return state
+
+
+def _looks_like_detail_visual(snapshot: Snapshot) -> bool:
+    """Conservatively identify the normal detail-card layout without OCR.
+
+    Used only when OCR temporarily returns no detections after a swipe.  The
+    next loop still needs ordinary page classification and a strict name
+    proof before any appraisal or rename action.
+    """
+
+    if not snapshot.image:
+        return False
+    try:
+        image = rotate_mcp_image_upright(snapshot.image, base.ORIENTATION)
+        width, height = image.size
+        card = image.crop((int(width * 0.15), int(height * 0.42), int(width * 0.85), int(height * 0.82)))
+        sky = image.crop((int(width * 0.15), int(height * 0.05), int(width * 0.85), int(height * 0.34)))
+        card_pixels = list(card.resize((36, 24)).getdata())
+        sky_pixels = list(sky.resize((36, 18)).getdata())
+    except Exception:
+        return False
+    white_ratio = sum(
+        1 for red, green, blue in card_pixels if min(red, green, blue) >= 215
+    ) / len(card_pixels)
+    cool_sky_ratio = sum(
+        1
+        for red, green, blue in sky_pixels
+        if (green >= red + 10 and green >= blue)
+        or (blue >= red + 10 and blue >= green)
+    ) / len(sky_pixels)
+    # The card includes the Pokémon model and green stat bar, so its white
+    # coverage is materially below a modal dialog.  Current Pokémon GO uses
+    # a dark blue presentation background on this device; older captures
+    # were green.  Require either cool background hue alongside the large
+    # white detail sheet, which keeps the check limited to normal detail
+    # layouts without depending on a seasonal background palette.
+    return white_ratio >= 0.35 and cool_sky_ratio >= 0.20
 
 
 @dataclass(frozen=True)
@@ -163,6 +332,34 @@ def fingerprints_differ(before: DetailFingerprint, after: DetailFingerprint) -> 
     return any(old != new for old, new in pairs)
 
 
+def navigation_confirmation_key(
+    fingerprint: DetailFingerprint,
+) -> tuple[str, str, str, str] | tuple[()]:
+    """Return the stable numeric pair used only to confirm a completed swipe.
+
+    Title OCR is intentionally strict later, immediately before any appraisal
+    or rename.  It is not stable enough to be a swipe-confirmation key on the
+    Stage Manager iPad: the same detail can alternate between a title, a
+    truncated nickname, and no title while CP/HP remain intact.  Requiring a
+    pair of independently visible numeric detail fields prevents that harmless
+    title variance from being mistaken for multiple Pokémon, while still
+    requiring three fresh captures before navigation can continue.
+    """
+
+    ordered_pairs = (
+        ("cp", fingerprint.cp, "hp", fingerprint.hp),
+        ("cp", fingerprint.cp, "weight", fingerprint.weight),
+        ("cp", fingerprint.cp, "height", fingerprint.height),
+        ("hp", fingerprint.hp, "weight", fingerprint.weight),
+        ("hp", fingerprint.hp, "height", fingerprint.height),
+        ("weight", fingerprint.weight, "height", fingerprint.height),
+    )
+    for first_label, first_value, second_label, second_value in ordered_pairs:
+        if first_value and second_value:
+            return first_label, first_value, second_label, second_value
+    return ()
+
+
 def wait_for_stable_detail_fingerprint(
     proxy: SafeProxy,
     snapshot: Snapshot,
@@ -220,7 +417,17 @@ def wait_for_stable_detail_fingerprint(
             "不会滑动、结束任务或重新打开游戏。"
         ),
     )
-    while True:
+    wait_started = time.monotonic()
+    attempt = 0
+    while attempt < MAX_PERSISTENT_READ_ONLY_ATTEMPTS:
+        attempt += 1
+        _emit_read_only_wait(
+            stage="详情翻页前身份复核",
+            reason="详情页的 CP/HP/体型字段暂时未被 OCR 完整读到。",
+            attempt=attempt,
+            started_at=wait_started,
+            next_action="读取下一张详情截图，恢复足够字段后才翻页。",
+        )
         candidate = base._next_snapshot(proxy, 3.0)
         try:
             return candidate, detail_fingerprint(candidate)
@@ -228,27 +435,41 @@ def wait_for_stable_detail_fingerprint(
             if "详情页稳定身份字段不足" in str(error):
                 continue
             raise
+    raise NoNextPokemon(
+        "详情身份字段连续 12 次读取仍不完整；将由批量读取会话恢复逻辑重新验证"
+    )
 
 
-def _swipe_next_once(proxy: SafeProxy, *, direction: str = "left") -> None:
+def _swipe_next_once(
+    proxy: SafeProxy, *, direction: str = "left", swipe_y_ratio: float = 0.28
+) -> None:
     observation = proxy.observation
     if observation is None or observation.width is None or observation.height is None:
         raise PolicyViolation("MCP 未返回触控空间")
     if direction not in {"left", "right"}:
         raise ValueError(f"unsupported swipe direction: {direction}")
+    if not 0.22 <= swipe_y_ratio <= 0.34:
+        raise ValueError(f"unsafe Pokemon-detail pager lane: {swipe_y_ratio}")
     from_ratio, to_ratio = (0.78, 0.22) if direction == "left" else (0.22, 0.78)
+    # Keep the lateral gesture wholly in the Pokémon artwork.  The lower
+    # title-row lane is swallowed by the detail sheet; the image area is the
+    # only region that Pokémon GO exposes to its card pager on this build.
+    # Left/right refer to the upright game image, not the raw MCP axes. Use
+    # the same calibrated transform as every other control; the iPad7,2
+    # digitizer-normalized profile maps visual left-to-right to increasing
+    # touch Y. Do not apply another rotation or infer direction from touch X.
     from_x, from_y = base.upright_ratio_to_touch(
         observation.width,
         observation.height,
         from_ratio,
-        0.50,
+        swipe_y_ratio,
         geometry=base.current_stage_geometry(proxy),
     )
     to_x, to_y = base.upright_ratio_to_touch(
         observation.width,
         observation.height,
         to_ratio,
-        0.50,
+        swipe_y_ratio,
         geometry=base.current_stage_geometry(proxy),
     )
     proxy.call_tool(
@@ -258,6 +479,13 @@ def _swipe_next_once(proxy: SafeProxy, *, direction: str = "left") -> None:
             "fromY": from_y,
             "toX": to_x,
             "toY": to_y,
+            # The MCP defaults to a short 300 ms/20-step motion. Pokémon GO
+            # occasionally consumes that as a sheet/Stage Manager gesture
+            # instead of its detail pager. Send one explicit, finger-like
+            # motion; SafeProxy still verifies the resulting page before any
+            # later action.
+            "duration": PAGER_SWIPE_DURATION_MS,
+            "steps": PAGER_SWIPE_STEPS,
             "_observation_token": observation.token,
             "_intent": f"navigate {direction} to next Pokemon detail",
             "_expected_after": "DETAIL for a different Pokemon",
@@ -292,7 +520,17 @@ def _stable_baseline(
                 "不会滑动、结束任务或重新打开游戏。"
             ),
         )
-        while True:
+        wait_started = time.monotonic()
+        attempt = 0
+        while attempt < MAX_PERSISTENT_READ_ONLY_ATTEMPTS:
+            attempt += 1
+            _emit_read_only_wait(
+                stage="翻页前详情稳定性确认",
+                reason="尚未取得两张一致的详情身份帧。",
+                attempt=attempt,
+                started_at=wait_started,
+                next_action="读取下一张详情截图；一致后才会执行一次翻页。",
+            )
             candidate = base._next_snapshot(proxy, 3.0)
             try:
                 fingerprint = detail_fingerprint(candidate)
@@ -308,6 +546,7 @@ def _stable_baseline(
 def _observe_after_swipe(
     proxy: SafeProxy,
     previous: DetailFingerprint,
+    previous_snapshot: Snapshot | None = None,
 ) -> tuple[Snapshot, DetailFingerprint, bool, tuple[Snapshot, ...]] | None:
     """Observe a bounded settling window after a swipe.
 
@@ -322,7 +561,16 @@ def _observe_after_swipe(
 
     same: tuple[Snapshot, DetailFingerprint, bool, tuple[Snapshot, ...]] | None = None
     blocked = _blocked_frame_hashes(proxy)
-    changed_samples: dict[DetailFingerprint, list[tuple[Snapshot, str]]] = {}
+    changed_samples: dict[
+        tuple[str, str, str, str], list[tuple[Snapshot, str, str, DetailFingerprint]]
+    ] = {}
+    previous_key = navigation_confirmation_key(previous)
+    previous_visual_key = (
+        _detail_card_visual_signature(previous_snapshot)
+        if previous_snapshot is not None
+        else ""
+    )
+    visual_changed_samples: dict[str, list[tuple[Snapshot, str]]] = {}
     for observation_index in range(OBSERVATIONS_PER_SWIPE):
         # Let the gesture settle for the first capture, then collect the
         # remaining independent identity proofs sooner.  All eight reads and
@@ -334,11 +582,48 @@ def _observe_after_swipe(
         )
         snapshot = base._next_snapshot(proxy, delay)
         digest = _snapshot_digest(snapshot)
-        if not digest or digest in blocked:
+        if not digest:
             # This exact pixel frame belonged to the Pokemon before the swipe.
             # A missing digest cannot prove that independently captured pixels
             # changed either.  In both cases this frame must never authorize a
             # new identity or a subsequent rename.
+            continue
+        state = _overview_state(snapshot)
+        if state is not None:
+            raise DetailExitedToOverview(snapshot, state)
+        visual_key = _detail_card_visual_signature(snapshot)
+        read_key = _independent_read_key(snapshot, digest)
+        if visual_key and previous_visual_key:
+            if visual_key != previous_visual_key:
+                visual_samples = visual_changed_samples.setdefault(visual_key, [])
+                if read_key not in {key for _sample, key in visual_samples}:
+                    visual_samples.append((snapshot, read_key))
+                if len(visual_samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
+                    return (
+                        snapshot,
+                        DetailFingerprint((), "", "", "", ""),
+                        True,
+                        tuple(sample for sample, _key in visual_samples),
+                    )
+                # Card content has changed but still needs two independent
+                # visual reads. Do not spend an expensive OCR pass on this
+                # intermediate frame: the visual proof is navigation-only,
+                # and the later name gate remains strict.
+                continue
+            # This is a visual same-card result, not an identity proof from
+            # fresh OCR. Return it immediately so the caller can try another
+            # safe lane; it is marked non-terminal and can never label a
+            # cached/stalled capture as the end of storage.
+            return snapshot, previous, False, (snapshot,)
+        if digest in blocked:
+            # A previously verified pixel frame cannot prove a swipe reached
+            # another Pokémon and must never contribute to a storage-end
+            # decision. It can still prove that the visible screen is the
+            # same harmless detail layout, which is enough to select a
+            # different safe gesture lane immediately instead of waiting for
+            # minutes on a cached screenshot stream.
+            if _looks_like_detail_visual(snapshot):
+                return snapshot, previous, False, (snapshot,)
             continue
         try:
             # This proves navigation only.  The subsequent per-Pokémon
@@ -348,23 +633,27 @@ def _observe_after_swipe(
             current = detail_fingerprint(snapshot, require_name=False)
         except PolicyViolation:
             continue
-        if fingerprints_differ(previous, current):
-            samples = changed_samples.setdefault(current, [])
-            if digest in {sample_digest for _sample, sample_digest in samples}:
-                # Replayed post-swipe pixels are not three independent proofs
-                # of a new detail page.  Do not turn one cached frame into a
-                # reusable three-frame identity.
+        current_key = navigation_confirmation_key(current)
+        if current_key and previous_key and current_key != previous_key:
+            samples = changed_samples.setdefault(current_key, [])
+            if read_key in {
+                sample_key for _sample, _digest, sample_key, _fingerprint in samples
+            }:
                 continue
-            samples.append((snapshot, digest))
+            samples.append((snapshot, digest, read_key, current))
             if len(samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
                 return (
                     snapshot,
-                    current,
+                    samples[-1][3],
                     True,
-                    tuple(sample for sample, _digest in samples),
+                    tuple(
+                        sample
+                        for sample, _digest, _read_key, _fingerprint in samples
+                    ),
                 )
             continue
-        same = snapshot, current, False, ()
+        if current_key and previous_key and current_key == previous_key:
+            same = snapshot, current, False, ()
     return same
 
 
@@ -396,12 +685,52 @@ def _wait_for_post_swipe_identity(
             ),
         )
     blocked = _blocked_frame_hashes(proxy)
-    changed_samples: dict[DetailFingerprint, list[tuple[Snapshot, str]]] = {}
-    while True:
+    changed_samples: dict[
+        tuple[str, str, str, str], list[tuple[Snapshot, str, str, DetailFingerprint]]
+    ] = {}
+    previous_key = navigation_confirmation_key(previous)
+    visual_detail_samples: list[tuple[Snapshot, str]] = []
+    wait_started = time.monotonic()
+    attempt = 0
+    while attempt < MAX_PERSISTENT_READ_ONLY_ATTEMPTS:
+        attempt += 1
+        _emit_read_only_wait(
+            stage="翻页后身份变化核验",
+            reason="滑动已发出，但新详情的身份字段暂时无法由 OCR 验证。",
+            attempt=attempt,
+            started_at=wait_started,
+            next_action="读取下一张详情截图；收齐三张不同身份帧后才处理下一只。",
+        )
         snapshot = base._next_snapshot(proxy, 3.0)
         digest = _snapshot_digest(snapshot)
         if not digest or digest in blocked:
             continue
+        state = _overview_state(snapshot)
+        if state is not None:
+            raise DetailExitedToOverview(snapshot, state)
+        # A freshly captured, visually classified detail may occasionally
+        # have no OCR numeric fields at all (notably during this iPad's
+        # animated shiny background).  It is still safe to carry that page to
+        # the next iteration after three independent captures: the next
+        # iteration repeats the strict three-frame *name* proof before it can
+        # appraise or rename anything.  This only unblocks navigation; it is
+        # never a rename authorization.
+        try:
+            is_visible_detail = base.local_page_state(snapshot) == "DETAIL"
+        except Exception:
+            is_visible_detail = False
+        is_visible_detail = is_visible_detail or _looks_like_detail_visual(snapshot)
+        if is_visible_detail:
+            read_key = _independent_read_key(snapshot, digest)
+            if read_key not in {key for _sample, key in visual_detail_samples}:
+                visual_detail_samples.append((snapshot, read_key))
+                if len(visual_detail_samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
+                    return (
+                        snapshot,
+                        DetailFingerprint((), "", "", "", ""),
+                        True,
+                        tuple(sample for sample, _key in visual_detail_samples),
+                    )
         try:
             # See _observe_after_swipe: numeric identity may carry a newly
             # reached detail through a temporary title-OCR gap, but it never
@@ -409,14 +738,29 @@ def _wait_for_post_swipe_identity(
             current = detail_fingerprint(snapshot, require_name=False)
         except PolicyViolation:
             continue
-        if not fingerprints_differ(previous, current):
+        current_key = navigation_confirmation_key(current)
+        if current_key and previous_key and current_key == previous_key:
             return snapshot, current, False, ()
-        samples = changed_samples.setdefault(current, [])
-        if digest in {sample_digest for _sample, sample_digest in samples}:
+        if not current_key or not previous_key:
             continue
-        samples.append((snapshot, digest))
+        samples = changed_samples.setdefault(current_key, [])
+        read_key = _independent_read_key(snapshot, digest)
+        if read_key in {
+            sample_key for _sample, _digest, sample_key, _fingerprint in samples
+        }:
+            continue
+        samples.append((snapshot, digest, read_key, current))
         if len(samples) >= CHANGED_IDENTITY_CONFIRMATIONS:
-            return snapshot, current, True, tuple(sample for sample, _digest in samples)
+            return (
+                snapshot,
+                samples[-1][3],
+                True,
+                tuple(
+                    sample
+                    for sample, _digest, _read_key, _fingerprint in samples
+                ),
+            )
+    return None
 
 
 def swipe_to_verified_next(
@@ -424,10 +768,23 @@ def swipe_to_verified_next(
     detail: Snapshot,
     *,
     before: DetailFingerprint | None = None,
+    allow_opposite_direction: bool = False,
 ) -> VerifiedNextDetail:
     previous = before or detail_fingerprint(detail)
-    if previous.name_tokens:
+    if before is None and previous.name_tokens:
+        # Callers without a precomputed fingerprint need this short baseline
+        # to prove that their starting page is stable before any swipe.
         detail, previous = _stable_baseline(proxy, detail, previous)
+    elif before is not None:
+        # The direct-detail batch has already required three independent
+        # identity reads immediately before it calls us. Asking it for two
+        # more title-OCR matches here is redundant and can deadlock on an
+        # otherwise stable iPad7,2 Stage Manager capture when OCR is briefly
+        # empty. Keep the existing post-swipe three-frame proof unchanged.
+        base.emit(
+            "status",
+            message="当前详情已由三次独立读取确认；直接验证下一次翻页。",
+        )
     else:
         # A name-free fingerprint is created only immediately after a rename
         # has been committed and character-for-character verified.  The
@@ -443,36 +800,106 @@ def swipe_to_verified_next(
             ),
         )
     unchanged_confirmations = 0
-    established_direction = getattr(proxy, "_batch_swipe_direction", None)
-    if established_direction in {"left", "right"}:
-        directions = [established_direction] * MAX_VERIFIED_SWIPE_ATTEMPTS
-    else:
-        # Storage sort order can place the first visible card at either end.
-        # Probe both directions only until the direction is established.  Once
-        # established, never reverse at the far end and accidentally walk back
-        # through already processed Pokemon.
-        directions = ["left", "left", "right", "right"]
-    for direction in directions:
-        _swipe_next_once(proxy, direction=direction)
-        observed = _observe_after_swipe(proxy, previous)
-        if observed is None:
-            observed = _wait_for_post_swipe_identity(proxy, previous)
-        if observed is None:
-            raise NoNextPokemon(
-                "横向翻页后连续只读采样仍无法确认安全详情页"
+    def _opposite_direction(direction: str) -> str:
+        return "right" if direction == "left" else "left"
+
+    # The user-verified base swipe stays the first try. If all lanes fail to
+    # show identity progress in a bounded window, retry once with the opposite
+    # gesture so a captured coordinate inversion only stalls for one full cycle
+    # instead of ending the whole batch.
+    # Always begin with the user-verified next direction.  A prior opposite
+    # fallback proves only that one inverted/edge gesture happened to move;
+    # persisting it would make the following card walk backwards.  The
+    # opposite direction remains a bounded last-resort probe for this call.
+    preferred_direction = NEXT_PAGER_DIRECTION
+    direction_plan: list[str] = [preferred_direction]
+    if allow_opposite_direction:
+        direction_plan.append(_opposite_direction(preferred_direction))
+    direction_plan = direction_plan[:2]
+
+    try:
+        setattr(proxy, "_batch_swipe_direction", preferred_direction)
+    except AttributeError:
+        pass
+    continue_with_second_direction = False
+    for sweep_index, direction in enumerate(direction_plan):
+        sweep_attempts = [
+            (direction, lane)
+            for lane in SAFE_PAGER_Y_RATIOS[:MAX_VERIFIED_SWIPE_ATTEMPTS]
+        ]
+        sweep_unchanged = 0
+        for attempt_number, (swipe_direction, lane) in enumerate(sweep_attempts, start=1):
+            overall_attempt = sweep_index * MAX_VERIFIED_SWIPE_ATTEMPTS + attempt_number
+            direction_text = (
+                "从右往左（←）" if swipe_direction == "left" else "从左往右（→）"
             )
-        snapshot, current, changed, samples = observed
-        if changed:
-            try:
-                setattr(proxy, "_batch_swipe_direction", direction)
-            except AttributeError:
-                pass
-            return VerifiedNextDetail(snapshot, current, samples)
-        unchanged_confirmations += 1
-        detail = snapshot
-    if unchanged_confirmations == MAX_VERIFIED_SWIPE_ATTEMPTS:
+            status_message = (
+                f"翻页尝试 {overall_attempt}/{len(direction_plan) * MAX_VERIFIED_SWIPE_ATTEMPTS}："
+                f"在精灵图像区{direction_text}短滑；"
+                "随后读取新截图确认游戏是否真的切到下一只。"
+            )
+            if sweep_index > 0 and attempt_number == 1:
+                status_message += "（上次方向未成功，尝试反向补偿）"
+            base.emit(
+                "status",
+                message=status_message,
+            )
+            _swipe_next_once(proxy, direction=swipe_direction, swipe_y_ratio=lane)
+            observed = _observe_after_swipe(proxy, previous, detail)
+            if observed is None:
+                observed = _wait_for_post_swipe_identity(proxy, previous)
+            if observed is None:
+                raise NoNextPokemon(
+                    "横向翻页后连续只读采样仍无法确认安全详情页"
+                )
+            snapshot, current, changed, samples = observed
+            if changed:
+                try:
+                    setattr(proxy, "_batch_swipe_direction", swipe_direction)
+                except AttributeError:
+                    pass
+                return VerifiedNextDetail(snapshot, current, samples)
+            # A non-empty sample bundle here is the explicit cached-frame marker
+            # from _observe_after_swipe. It is useful only to try another safe
+            # lane; it is deliberately excluded from the strict end-of-storage
+            # proof because the pixels predate this gesture.
+            if not samples:
+                unchanged_confirmations += 1
+                sweep_unchanged += 1
+            base.emit(
+                "status",
+                message=(
+                    "本次滑动尚未被三张新画面确认；"
+                    "不会把它算作翻页或增加进度，正在换下一条安全图像区尝试。"
+                ),
+            )
+            detail = snapshot
+            # Stay in the same verified direction while trying the remaining
+            # safe artwork lanes.  The old ``break`` exited after the first
+            # swallowed gesture, so neither the four-attempt end proof nor a
+            # later successful lane could ever be reached.
+            if sweep_unchanged < MAX_VERIFIED_SWIPE_ATTEMPTS:
+                continue
+        if sweep_unchanged < MAX_VERIFIED_SWIPE_ATTEMPTS:
+            continue_with_second_direction = False
+            break
+        if sweep_index == 0 and allow_opposite_direction:
+            continue_with_second_direction = True
+            base.emit(
+                "status",
+                message=(
+                    "首选方向连续四次未见身份确认；"
+                    "将暂时改用反向手势再验证一次。"
+                ),
+            )
+    if not continue_with_second_direction and sweep_unchanged < MAX_VERIFIED_SWIPE_ATTEMPTS:
+        raise NoNextPokemon(
+            "横向翻页后未验证到不同宝可梦；"
+            "无法证明已到盒子末尾"
+        )
+    if unchanged_confirmations == MAX_VERIFIED_SWIPE_ATTEMPTS * len(direction_plan):
         raise VerifiedEndOfStorage(
-            "已在纯详情页连续四次翻页，稳定身份均未变化"
+            "已在纯详情页连续尝试后，稳定身份均未变化"
         )
     raise NoNextPokemon(
         "横向翻页后未验证到不同宝可梦；"

@@ -1,0 +1,351 @@
+diff --git a/AccessibilityManager.m b/AccessibilityManager.m
+index 4debd3a..dcabcae 100644
+--- a/AccessibilityManager.m
++++ b/AccessibilityManager.m
+@@ -966,6 +966,13 @@ - (void)getCompactUIElementsWithMaxElements:(NSInteger)maxElements
+                 return;
+             }
+
++            // A bounded crawl has already used its safe time slice. Do not
++            // queue four more full crawls after the HTTP caller has given up.
++            if ([compactError containsString:@"query budget exhausted"]) {
++                if (completion) completion(nil, compactError);
++                return;
++            }
++
+             NSDictionary *bootstrapResult = nil;
+             BOOL attemptedBootstrap = NO;
+             if (MCPEnableAXUIClientBootstrap &&
+@@ -1009,6 +1016,11 @@ - (void)getCompactUIElementsWithMaxElements:(NSInteger)maxElements
+                     return;
+                 }
+
++                if ([retryError containsString:@"query budget exhausted"]) {
++                    if (completion) completion(nil, retryError);
++                    return;
++                }
++
+                 if (retryError.length > 0) {
+                     [retryErrors addObject:[NSString stringWithFormat:@"attempt%lu_after_%.2fs=%@",
+                                             (unsigned long)attemptIndex,
+diff --git a/HIDManager.m b/HIDManager.m
+index 6248515..c23a1cb 100644
+--- a/HIDManager.m
++++ b/HIDManager.m
+@@ -39,6 +39,36 @@ @implementation IOSMCPHIDManager {
+     CGFloat _screenHeight;
+ }
+
++// UIScreen.bounds changes when SpringBoard rotates or rearranges a Stage
++// Manager scene.  HID digitizer coordinates are normalised against these
++// values, so caching them only at service startup makes every later touch land
++// at the wrong physical position while the API still reports success.
++- (void)refreshScreenMetrics {
++    dispatch_block_t refreshBlock = ^{
++        UIScreen *screen = [UIScreen mainScreen];
++        CGRect bounds = screen.bounds;
++        CGFloat width = bounds.size.width;
++        CGFloat height = bounds.size.height;
++        if (width < 1.0 || height < 1.0) {
++            HID_LOG(@"Ignoring invalid screen metrics %.2fx%.2f", width, height);
++            return;
++        }
++
++        self->_screenScale = screen.scale;
++        self->_screenWidth = width;
++        self->_screenHeight = height;
++        _deviceScreenWidth = width;
++        _deviceScreenHeight = height;
++        HID_LOG(@"Refreshed screen metrics: %.0fx%.0f @%.0fx", width, height, self->_screenScale);
++    };
++
++    if ([NSThread isMainThread]) {
++        refreshBlock();
++    } else {
++        dispatch_sync(dispatch_get_main_queue(), refreshBlock);
++    }
++}
++
+ + (instancetype)sharedInstance {
+     static IOSMCPHIDManager *instance;
+     static dispatch_once_t onceToken;
+@@ -58,15 +88,7 @@ - (instancetype)init {
+         }
+
+         dispatch_block_t initBlock = ^{
+-            UIScreen *screen = [UIScreen mainScreen];
+-            self->_screenScale = screen.scale;
+-            self->_screenWidth = screen.bounds.size.width;
+-            self->_screenHeight = screen.bounds.size.height;
+-            _deviceScreenWidth = self->_screenWidth;
+-            _deviceScreenHeight = self->_screenHeight;
+             memset(_eventsToAppend, 0, sizeof(_eventsToAppend));
+-            HID_LOG(@"Screen: %.0fx%.0f @%.0fx", self->_screenWidth, self->_screenHeight, self->_screenScale);
+-
+             HID_LOG(@"Using fixed sender ID: %llu", _touchSenderID);
+         };
+
+@@ -75,6 +97,7 @@ - (instancetype)init {
+         } else {
+             dispatch_sync(dispatch_get_main_queue(), initBlock);
+         }
++        [self refreshScreenMetrics];
+     }
+     return self;
+ }
+@@ -284,6 +307,7 @@ - (BOOL)performTouchAtPoint:(CGPoint)point phase:(TouchPhase)phase error:(NSStri
+ }
+
+ - (void)sendTouchAtPoint:(CGPoint)point phase:(TouchPhase)phase {
++    [self refreshScreenMetrics];
+     NSString *error = nil;
+     [self performTouchAtPoint:point phase:phase error:&error];
+     if (error.length > 0) {
+@@ -308,6 +332,7 @@ - (BOOL)performTapSequenceAtPoint:(CGPoint)point error:(NSString **)error {
+ }
+
+ - (void)tapAtPoint:(CGPoint)point completion:(void (^)(BOOL, NSString *))completion {
++    [self refreshScreenMetrics];
+     dispatch_async(_hidQueue, ^{
+         @try {
+             NSString *error = nil;
+@@ -330,7 +355,9 @@ - (void)swipeFromPoint:(CGPoint)from
+                toPoint:(CGPoint)to
+               duration:(NSTimeInterval)durationMs
+                  steps:(NSInteger)steps
+-            completion:(void (^)(BOOL, NSString *))completion {
++             completion:(void (^)(BOOL, NSString *))completion {
++
++    [self refreshScreenMetrics];
+
+     dispatch_async(_hidQueue, ^{
+         @try {
+@@ -392,6 +419,7 @@ - (void)longPressAtPoint:(CGPoint)point
+ - (void)doubleTapAtPoint:(CGPoint)point
+                 interval:(NSTimeInterval)intervalMs
+               completion:(void (^)(BOOL, NSString *))completion {
++    [self refreshScreenMetrics];
+     dispatch_async(_hidQueue, ^{
+         @try {
+             NSString *error = nil;
+@@ -424,6 +452,7 @@ - (void)dragAlongPoints:(NSArray<NSValue *> *)points
+            moveDuration:(NSTimeInterval)moveMs
+                   steps:(NSInteger)steps
+              completion:(void (^)(BOOL, NSString *))completion {
++    [self refreshScreenMetrics];
+     dispatch_async(_hidQueue, ^{
+         @try {
+             if (points.count < 2) {
+diff --git a/MCPAXNodeSource.m b/MCPAXNodeSource.m
+index 60d4514..eacfa3e 100644
+--- a/MCPAXNodeSource.m
++++ b/MCPAXNodeSource.m
+@@ -2358,28 +2358,25 @@ - (NSDictionary * _Nullable)serializeCompactLeafElement:(AXUIElementRef)leafElem
+     NSArray<NSNumber *> *numericAttributes = @[
+         @(kMCPAXNodeAttributeLabel),
+         @(kMCPAXNodeAttributeFrame),
+-        @(kMCPAXNodeAttributeValue),
+-        @(kMCPAXNodeAttributeWindowContextId),
+-        @(kMCPAXNodeAttributeWindowDisplayId)
++        @(kMCPAXNodeAttributeValue)
+     ];
+     NSDictionary<NSNumber *, id> *numericValues = [self.attributeBridge copyNumericAttributeMap:leafElement attributes:numericAttributes] ?: @{};
++    // Compact queries need the current label/value and rectangle, not six
++    // individually queried diagnostic attributes on every keyboard key.
+     NSDictionary<NSString *, id> *xcValues = [self.attributeBridge copyXCAttributeMap:leafElement attributeKeys:@[
+         @"frame",
+         @"isVisible",
+         @"label",
+-        @"value",
+-        @"visibleFrame",
+-        @"windowContextId",
+-        @"windowDisplayId"
+-    ]] ?: @{};
+-    NSDictionary<NSString *, id> *directValues = [self.attributeBridge copyDirectAttributeMap:leafElement attributeKeys:@[
+-        @"centerPoint",
+-        @"focusableFrameForZoom",
+-        @"userInputLabels",
+-        @"visibleFrame",
+-        @"windowContextId",
+-        @"windowDisplayId"
++        @"value"
+     ]] ?: @{};
++    NSDictionary<NSString *, id> *directValues = @{};
++    CGRect primaryFrame = CGRectZero;
++    if (!MCPAXNodeCGRectFromObject(xcValues[@"frame"] ?: numericValues[@(kMCPAXNodeAttributeFrame)], &primaryFrame) ||
++        CGRectIsEmpty(primaryFrame)) {
++        directValues = [self.attributeBridge copyDirectAttributeMap:leafElement attributeKeys:@[
++            @"focusableFrameForZoom", @"visibleFrame"
++        ]] ?: @{};
++    }
+
+     CGRect rect = CGRectNull;
+     for (id frameValue in @[
+@@ -2461,6 +2458,9 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+                                             error:(NSString * _Nullable * _Nullable)error {
+     __block NSDictionary *resultPayload = nil;
+     __block NSString *resultError = nil;
++    // The HTTP interface waits ten seconds. A compact read must not keep
++    // crawling on SpringBoard's main queue after that request has timed out.
++    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 5.0;
+
+     [self.attributeBridge performOnMainThreadSync:^{
+         @try {
+@@ -2481,6 +2481,10 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+             CGRect screenBounds = MCPAXNodeScreenBounds();
+             NSMutableArray<NSMutableDictionary *> *elements = [NSMutableArray array];
+             NSMutableOrderedSet<NSString *> *seenFingerprints = [NSMutableOrderedSet orderedSet];
++            NSMutableSet *seenRemoteElements = [NSMutableSet set];
++            BOOL (^outOfBudget)(void) = ^BOOL {
++                return NSProcessInfo.processInfo.systemUptime >= deadline;
++            };
+             __block NSUInteger appCandidateCount = 0;
+             __block NSUInteger windowCandidateCount = 0;
+             __block NSUInteger sampledHitCandidateCount = 0;
+@@ -2488,7 +2492,12 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+
+             void (^appendCompactElement)(AXUIElementRef, NSString *, NSDictionary *) =
+                 ^(AXUIElementRef leafElement, NSString *source, NSDictionary *extra) {
+-                if (!leafElement || elements.count >= (NSUInteger)limit) return;
++                if (!leafElement || elements.count >= (NSUInteger)limit || outOfBudget()) return;
++                id remoteObject = (__bridge id)leafElement;
++                if ([seenRemoteElements containsObject:remoteObject]) return;
++                [seenRemoteElements addObject:remoteObject];
++                pid_t leafPid = 0;
++                if ([self.attributeBridge getPid:&leafPid fromElement:leafElement] && leafPid > 0 && leafPid != pid) return;
+
+                 NSDictionary *compact = [self serializeCompactLeafElement:leafElement
+                                                                        pid:pid
+@@ -2526,10 +2535,10 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+
+             void (^appendCandidateGroups)(AXUIElementRef, NSString *, BOOL) =
+                 ^(AXUIElementRef sourceElement, NSString *sourcePrefix, BOOL appLevel) {
+-                if (!sourceElement || elements.count >= (NSUInteger)limit) return;
++                if (!sourceElement || elements.count >= (NSUInteger)limit || outOfBudget()) return;
+
+                 for (NSDictionary<NSString *, id> *sourceInfo in candidateSources) {
+-                    if (elements.count >= (NSUInteger)limit) break;
++                    if (elements.count >= (NSUInteger)limit || outOfBudget()) break;
+
+                     NSNumber *attributeNumber = [sourceInfo[@"attribute"] isKindOfClass:[NSNumber class]] ? sourceInfo[@"attribute"] : nil;
+                     NSString *sourceName = [sourceInfo[@"source"] isKindOfClass:[NSString class]] ? sourceInfo[@"source"] : @"numeric.candidates";
+@@ -2548,7 +2557,7 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+                         [NSString stringWithFormat:@"%@.%@", sourcePrefix, sourceName] :
+                         sourceName;
+                     for (id leaf in leaves) {
+-                        if (elements.count >= (NSUInteger)limit) break;
++                        if (elements.count >= (NSUInteger)limit || outOfBudget()) break;
+                         if (!leaf || leaf == NSNull.null) continue;
+                         appendCompactElement((__bridge AXUIElementRef)leaf, qualifiedSource, nil);
+                     }
+@@ -2557,25 +2566,27 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+
+             appendCandidateGroups(appElement, @"application", YES);
+
+-            NSArray *windows = [self.attributeBridge copyNumericAttributeArray:appElement
++            NSArray *windows = outOfBudget() ? @[] : [self.attributeBridge copyNumericAttributeArray:appElement
+                                                                    attributeId:kMCPAXNodeAttributeChildren];
+             for (id window in windows) {
+-                if (elements.count >= (NSUInteger)limit) break;
++                if (elements.count >= (NSUInteger)limit || outOfBudget()) break;
+                 if (!window || window == NSNull.null) continue;
+                 appendCandidateGroups((__bridge AXUIElementRef)window, @"window", NO);
+             }
+
+             NSMutableArray<NSString *> *sampledHitErrors = [NSMutableArray array];
+-            if (MCPAXNodeSourceEnableNumericSampledHitMerge && elements.count < (NSUInteger)limit) {
++            // Never turn a successful native text-field read into a timeout
++            // just to add speculative screen-wide hit-test results.
++            if (MCPAXNodeSourceEnableNumericSampledHitMerge && elements.count == 0 && !outOfBudget()) {
+                 NSArray<NSValue *> *samplePoints = MCPAXNodeCompactScreenProbePoints(screenBounds);
+                 for (NSValue *pointValue in samplePoints) {
+-                    if (elements.count >= (NSUInteger)limit) break;
++                    if (elements.count >= (NSUInteger)limit || outOfBudget()) break;
+
+                     CGPoint point = pointValue.CGPointValue;
+                     NSString *hitError = nil;
+                     AXUIElementRef hitElement = [self.attributeBridge copyHitTestElementAtPoint:point
+                                                                                     expectedPid:pid
+-                                                                             allowParameterized:YES
++                                                                             allowParameterized:NO
+                                                                                           error:&hitError];
+                     if (!hitElement) {
+                         if (hitError.length > 0) {
+@@ -2602,6 +2613,10 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+             CFRelease(appElement);
+
+             if (elements.count == 0) {
++                if (outOfBudget()) {
++                    resultError = @"Compact AX query budget exhausted; no verified nodes available";
++                    return;
++                }
+                 resultError = [NSString stringWithFormat:@"Compact AX crawl serialized no visible nodes (appCandidates=%lu, windows=%lu, windowCandidates=%lu, sampledHits=%lu)",
+                                (unsigned long)appCandidateCount,
+                                (unsigned long)windows.count,
+@@ -2624,6 +2639,7 @@ - (NSDictionary * _Nullable)compactElementsForPid:(pid_t)pid
+             payload[@"window_candidate_count"] = @(windowCandidateCount);
+             payload[@"sampled_hit_count"] = @(sampledHitCandidateCount);
+             payload[@"serialized_candidate_count"] = @(serializedCandidateCount);
++            payload[@"query_budget_exhausted"] = @(outOfBudget());
+             payload[@"numeric_max_elements"] = @(limit);
+             payload[@"pid"] = @(pid);
+             if (bundleId.length > 0) payload[@"bundleId"] = bundleId;
+diff --git a/MCPServer.m b/MCPServer.m
+index 264b2c5..172d0dd 100644
+--- a/MCPServer.m
++++ b/MCPServer.m
+@@ -31,7 +31,7 @@
+ #define MCP_PROTOCOL_VERSION_LATEST @"2025-11-25"
+ #define MCP_PROTOCOL_VERSION_LEGACY @"2025-03-26"
+ #define MCP_SERVER_NAME             @"ios-mcp"
+-#define MCP_SERVER_VERSION          @"1.2.5"
++#define MCP_SERVER_VERSION          @"1.2.5-axfix1"
+ #define HTTP_BUF_SIZE        (256 * 1024)
+ #define MCP_MAX_CHUNK_LINE   (8 * 1024)
+ #define MCP_UPLOAD_DIR       @"/var/mobile/Library/Caches/ios-mcp-uploads"
+diff --git a/Makefile.touch-fix b/Makefile.touch-fix
+new file mode 100644
+--- /dev/null
++++ b/Makefile.touch-fix
+@@ -0,0 +1,16 @@
++# Build only the rootless server tweak.  The release package provides the
++# unchanged helpers and preference bundle; this target gives the orientation
++# repair a separately auditable arm64 dylib before it is inserted into the
++# complete official package layout.
++ARCHS = arm64
++TARGET = iphone:clang:latest:15.0
++THEOS_PACKAGE_SCHEME = rootless
++
++include $(THEOS)/makefiles/common.mk
++
++TWEAK_NAME = ios-mcp
++ios-mcp_FILES = Tweak.x MCPServer.m MCPLogger.m HIDManager.m ScreenManager.m ClipboardManager.m AppManager.m AccessibilityManager.m TextInputManager.m FileSystemManager.m LogManager.m OCRManager.m MCPProcessUtil.m MCPAXQueryContext.m MCPAXRemoteContextResolver.m MCPUIElementSerializer.m MCPAXNodeSource.m MCPUIElementsFacade.m MCPAXAttributeBridge.m
++ios-mcp_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-deprecated-declarations -DMCP_ROOTLESS=1 -Icompat
++ios-mcp_FRAMEWORKS = IOKit UIKit CoreGraphics QuartzCore MobileCoreServices AVFoundation Security Vision
++
++include $(THEOS_MAKE_PATH)/tweak.mk
+diff --git a/compat/roothide.h b/compat/roothide.h
+new file mode 100644
+--- /dev/null
++++ b/compat/roothide.h
+@@ -0,0 +1,20 @@
++// Build-time compatibility declarations for the rootless target.
++// A rootless bootstrap installs executables under /var/jb. Leaving these
++// paths unchanged silently produces a rootful binary inside an arm64 package.
++#import <Foundation/Foundation.h>
++
++static inline NSString *jbroot(NSString *path) {
++#if defined(MCP_ROOTLESS)
++    if (!path.length || [path isEqualToString:@"/var/jb"] || [path hasPrefix:@"/var/jb/"]) return path ?: @"";
++    return [@"/var/jb" stringByAppendingString:path];
++#else
++    return path ?: @"";
++#endif
++}
++
++static inline NSString *rootfs(NSString *path) {
++#if defined(MCP_ROOTLESS)
++    if ([path hasPrefix:@"/var/jb/"]) return [path substringFromIndex:7];
++#endif
++    return path ?: @"";
++}

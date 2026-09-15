@@ -5,7 +5,7 @@ import os
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .background_batch_runner import background_run_is_active, request_background_stop
@@ -126,6 +126,8 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self.live_pokemon_var = self.tk.StringVar(value="当前宝可梦：等待详情身份确认")
         self.live_page_var = self.tk.StringVar(value="当前画面：等待 iPad 截图")
         self.live_step_var = self.tk.StringVar(value="当前步骤：等待工作进程")
+        self.live_wait_var = self.tk.StringVar(value="等待说明：尚未收到等待状态")
+        self.live_result_var = self.tk.StringVar(value="本只结果：尚未开始")
         self.live_iv_var = self.tk.StringVar(value="IV / 昵称：尚未读取")
         self.live_updated_var = self.tk.StringVar(value="画面更新时间：尚未收到")
         self._live_preview_mtime = -1
@@ -147,7 +149,7 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
             width=23,
             height=12,
         )
-        self.live_preview_label.grid(row=0, column=0, rowspan=6, sticky="nsw", padx=(0, 14))
+        self.live_preview_label.grid(row=0, column=0, rowspan=8, sticky="nsw", padx=(0, 14))
         self.ttk.Label(monitor, text="实时 iPad 画面与操作", style="CardTitle.TLabel").grid(
             row=0, column=1, sticky="w"
         )
@@ -157,6 +159,8 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 self.live_pokemon_var,
                 self.live_page_var,
                 self.live_step_var,
+                self.live_wait_var,
+                self.live_result_var,
                 self.live_iv_var,
                 self.live_updated_var,
             ),
@@ -193,6 +197,19 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         raw = str(value or "等待识别")
         return states.get(raw, raw)
 
+    @staticmethod
+    def _phase_text(value: object) -> str:
+        """Describe a card-level phase without implying the batch has ended."""
+
+        phases = {
+            "processing": "正在处理（本只尚未完成）",
+            "completed": "本只已完成，正在翻到下一只（批量仍在运行）",
+            "paused": "已在安全边界暂停",
+            "resumed": "已恢复，正在重新核验当前只",
+        }
+        raw = str(value or "等待下一步")
+        return phases.get(raw, raw)
+
     def _refresh_live_monitor(self) -> None:
         """Poll only local worker artifacts; this never asks MCP for another frame."""
 
@@ -206,14 +223,18 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         phase = progress.get("phase")
         state_text = str(state.get("status", "待机"))
         position = f"第 {current} 只" if current else "尚未开始"
-        self.live_run_var.set(f"任务：{state_text} · {position} · {phase or '等待下一步'}")
+        self.live_run_var.set(
+            f"任务：{state_text} · {position} · {self._phase_text(phase)}"
+        )
         if current:
             counts = (
                 f"改名 {int(progress.get('renamed', 0) or 0)} · "
                 f"已命名跳过 {int(progress.get('skipped', 0) or 0)} · "
                 f"暂不可读保留 {int(progress.get('unreadable', 0) or 0)}"
             )
-            self.progress_var.set(f"进度：{position} · {phase or '处理中'} · {counts}")
+            self.progress_var.set(
+                f"进度：{position} · {self._phase_text(phase)} · {counts}"
+            )
 
         pokemon = activity.get("pokemon")
         if isinstance(pokemon, dict):
@@ -223,6 +244,69 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         self.live_page_var.set(f"当前画面：{self._screen_text(activity.get('screen'))}")
         step = str(activity.get("step", "等待工作进程事件")).strip()
         self.live_step_var.set(f"当前步骤：{step}")
+
+        updated_raw = str(activity.get("updated_at", "")).strip()
+        stale_seconds: int | None = None
+        try:
+            updated_at = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            stale_seconds = max(
+                0, int((datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds())
+            )
+        except ValueError:
+            pass
+
+        waiting = activity.get("waiting")
+        if isinstance(waiting, dict):
+            stage = str(waiting.get("stage", "等待")).strip()
+            reason = str(waiting.get("reason", "正在读取 iPad 画面")).strip()
+            attempt = waiting.get("attempt")
+            total = waiting.get("total")
+            elapsed = waiting.get("elapsed_seconds")
+            attempt_text = (
+                f"第 {attempt}/{total} 次" if attempt and total else "持续读取中"
+            )
+            elapsed_text = f"已等 {elapsed} 秒" if elapsed is not None else "刚开始"
+            next_action = str(waiting.get("next_action", "继续安全读取")).strip()
+            user_action = str(waiting.get("user_action", "无需操作")).strip()
+            self.live_wait_var.set(
+                f"等待说明：{stage} · {attempt_text} · {elapsed_text}\n"
+                f"原因：{reason}\n下一步：{next_action} · 你需要：{user_action}"
+            )
+        elif (
+            state_text in {"running", "starting", "waiting_for_mcp"}
+            and stale_seconds is not None
+            and stale_seconds >= 15
+        ):
+            self.live_wait_var.set(
+                f"等待说明：{stale_seconds} 秒未收到新的可验证工作事件。\n"
+                "原因：iPad 截图或本地 OCR 可能正在重试，尚不能证明可安全继续。\n"
+                "下一步：后台会继续只读验证；若状态持续不更新，任务会明确改为“需要你操作”，不会盲点。"
+            )
+        else:
+            self.live_wait_var.set("等待说明：当前未在等待；后台正执行已显示的步骤。")
+
+        # ``last_result`` from a previous process must never be presented as
+        # the result of the currently running unlimited job.  The current
+        # worker's per-card result is deliberately separate from a true batch
+        # completion banner.
+        item_result = str(activity.get("item_result", "")).strip()
+        terminal_result = str(activity.get("last_result", "")).strip()
+        if item_result:
+            self.live_result_var.set(f"本只结果：{item_result}")
+        elif state_text in {"running", "starting", "waiting_for_mcp"} and terminal_result:
+            self.live_result_var.set("本只结果：后台仍在运行；已忽略上一轮遗留的结束提示。")
+        elif terminal_result:
+            self.live_result_var.set(f"本只结果：{terminal_result}")
+        else:
+            self.live_result_var.set("本只结果：尚未完成；请以“当前步骤”和“等待说明”为准。")
+
+        attention = activity.get("attention")
+        if isinstance(attention, dict) and attention.get("required"):
+            reason = str(attention.get("reason", "发生安全错误")).strip()
+            action = str(attention.get("user_action", "请查看控制面板")).strip()
+            self.live_wait_var.set(f"需要你操作：{action}\n原因：{reason}")
 
         iv = activity.get("iv")
         nickname = str(activity.get("nickname", "")).strip()
@@ -236,8 +320,13 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
         elif nickname:
             self.live_iv_var.set(f"IV / 昵称：{nickname}")
 
-        updated = str(activity.get("updated_at", "")).replace("T", " ").replace("+00:00", " UTC")
-        self.live_updated_var.set(f"画面/状态更新时间：{updated or '等待首张截图'}")
+        updated = updated_raw.replace("T", " ").replace("+00:00", " UTC")
+        stale_note = (
+            f" · 已 {stale_seconds} 秒无新事件" if stale_seconds is not None and stale_seconds >= 15 else ""
+        )
+        self.live_updated_var.set(
+            f"画面/状态更新时间：{updated or '等待首张截图'}{stale_note}"
+        )
         try:
             modified = preview_path.stat().st_mtime_ns
             if modified != self._live_preview_mtime:
@@ -422,11 +511,12 @@ class IPadLandscapeRenamerAppV9(IPadLandscapeRenamerAppV8):
                 "POGO_BATCH_STATE": str(self._batch_state_path()),
                 "POGO_LIVE_ACTIVITY_PATH": str(self._live_activity_paths()[0]),
                 "POGO_LIVE_PREVIEW_PATH": str(self._live_activity_paths()[1]),
-                # The visible app uses the same direct-detail route as the
-                # headless continuation: never leave the user-opened Pokémon
-                # detail page and never relaunch the game after a transient
-                # MCP interruption.
-                "POGO_START_FROM_CURRENT_DETAIL": "true",
+                # Use the verified automatic entry route.  It recognizes an
+                # already-open detail and can also resume from the game's
+                # map, menu, or storage without asking the user to reopen a
+                # Pokémon by hand.  Each intermediate page is re-observed
+                # before the next calibrated action.
+                "POGO_START_FROM_CURRENT_DETAIL": "false",
                 "POGO_ALLOW_GAME_RESTART": "false",
                 "POGO_PERSIST_CAPTURE_WAIT": "true",
                 }

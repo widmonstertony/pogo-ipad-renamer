@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import time
 
 from . import ipad_landscape_agent as base
 from . import ipad_landscape_agent_v13 as v13
@@ -11,6 +13,7 @@ from . import ipad_landscape_agent_v16 as v16
 from .config import Settings
 from .device_run_lock import DeviceRunLock
 from .ipad_landscape_agent_v10 import _mark_rename_observation
+from .ipad_landscape_agent_v5 import exact_name_field
 from .ipad_landscape_agent_v12 import _backspace_current_name
 from .ipad_landscape_agent_v20 import (
     _navigate_with_stale_dialog_recovery,
@@ -27,6 +30,7 @@ from .policy import PolicyViolation, normalize_text
 from .rename_controls_v20 import tap_ok
 from .rename_controls_v20 import tap_cancel
 from .server import SafeProxy
+from .protocol import text_from_content
 
 
 _FIELD_READ_RETRY_LIMIT = 3
@@ -39,6 +43,8 @@ _CANCEL_DETAIL_READ_LIMIT = 5
 # a fast frame never authorizes an extra OK tap by itself.
 _FIELD_READ_RETRY_DELAY_SECONDS = 0.6
 _FIRST_SUBMIT_OUTCOME_DELAY_SECONDS = 1.0
+_LOCATION_RETRY_DELAY_SECONDS = 5.0
+_LOCATION_WAIT_LIMIT_SECONDS = 30 * 60
 
 
 class RenameFieldVerificationUnavailable(PolicyViolation):
@@ -48,6 +54,143 @@ class RenameFieldVerificationUnavailable(PolicyViolation):
         super().__init__("输入字段在有限只读重测后仍不可核验；已取消未提交内容")
         self.snapshot = snapshot
         self.actual = actual
+
+
+class RenameCancelDidNotDismiss(PolicyViolation):
+    """A verified Cancel tap left the same rename dialog visibly open."""
+
+    def __init__(self, snapshot: Snapshot) -> None:
+        super().__init__("取消后改名弹窗仍由当前像素确认")
+        self.snapshot = snapshot
+
+
+class AccessibilityRuntimeUnavailable(PolicyViolation):
+    """MCP explicitly reports its AX runtime unavailable, not a locked iPad."""
+
+
+def _location_error_banner_visible(lines) -> bool:
+    """Recognize Pokémon GO error 12 despite the common 偵測/偵側 OCR swap."""
+
+    for line in lines:
+        compact = normalize_text(getattr(line, "text", "")).replace(" ", "")
+        if "無法" in compact and "目前位置" in compact and "12" in compact:
+            return True
+    return False
+
+
+def _wait_for_submit_environment(
+    proxy: SafeProxy, initial: Snapshot
+) -> Snapshot:
+    """Keep a proven edit untouched while location error 12 disables OK.
+
+    Error 12 visibly greys the game's OK control. Repeatedly tapping that
+    disabled control cannot work and used to exhaust the rename retry budget.
+    This is an environmental wait only: screenshots are read, no text is
+    rewritten, and no control is clicked until the banner has disappeared.
+    """
+
+    candidate = initial
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        if not candidate.image:
+            raise PolicyViolation("提交前缺少改名弹窗截图；未点击 OK")
+        lines = ocr_mcp_screenshot(candidate.image, base.ORIENTATION)
+        if not _location_error_banner_visible(lines):
+            return candidate
+        if not rename_dialog_visible(lines):
+            raise PolicyViolation("位置错误横幅下无法同时证明改名弹窗；未点击 OK")
+        elapsed = time.monotonic() - started
+        if elapsed >= _LOCATION_WAIT_LIMIT_SECONDS:
+            raise PolicyViolation(
+                "位置错误 12 持续 30 分钟，OK 仍被游戏禁用；字段保持未提交"
+            )
+        attempt += 1
+        emit(
+            "waiting",
+            screen="RENAME_DIALOG",
+            stage="等待游戏恢复定位",
+            reason="检测到‘无法侦测目前位置 (12)’；游戏已禁用 OK。",
+            attempt=attempt,
+            total=None,
+            elapsed_seconds=int(elapsed),
+            next_action="只读等待横幅消失；恢复后才点击一次 OK。",
+            user_action="通常无需操作；请保持 Pokémon GO 在前台并允许定位。",
+        )
+        candidate = base._next_snapshot(proxy, _LOCATION_RETRY_DELAY_SECONDS)
+
+
+def _ax_runtime_is_inactive(result: dict) -> bool:
+    def inactive(value):
+        if isinstance(value, dict):
+            if value.get("axRuntimeMode") == "inactive":
+                return True
+            return any(inactive(child) for child in value.values())
+        if isinstance(value, list):
+            return any(inactive(child) for child in value)
+        return False
+
+    if inactive(result.get("structuredContent")):
+        return True
+    for item in result.get("content", []):
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        try:
+            value = json.loads(item.get("text", ""))
+        except (TypeError, ValueError):
+            continue
+        if inactive(value):
+            return True
+    return False
+
+
+def _require_name_field_runtime(proxy: SafeProxy, current_name: str) -> None:
+    """Fail before clearing when MCP itself says exact field reads cannot work."""
+    observation = proxy.observation
+    if observation is not None:
+        try:
+            if exact_name_field(Snapshot(observation.text, None)) == current_name:
+                proxy._prefer_complete_field_tree = True
+                return
+        except PolicyViolation:
+            pass
+    started = time.monotonic()
+    inactive_seen = False
+    for attempt in range(1, 4):
+        if attempt > 1:
+            reset = getattr(getattr(proxy, "client", None), "reset_read_session", None)
+            if callable(reset):
+                reset()
+        emit("waiting", screen="RENAME_DIALOG", stage="输入前完整字段核验",
+             reason="确认当前输入框原名；MCP 空树只做有限只读重测，尚未清空或输入。",
+             attempt=attempt, total=3, elapsed_seconds=int(time.monotonic() - started),
+             next_action="完整原名一致后才清空；失败则取消并保留原名。",
+             user_action="无需操作；不要手动点 OK。")
+        result = proxy.call_tool("get_ui_elements", {
+            "visible_only": False, "clickable_only": False, "limit": 160, "debug": True,
+        })
+        inactive_seen = inactive_seen or _ax_runtime_is_inactive(result)
+        try:
+            actual = exact_name_field(Snapshot(text_from_content(result), None))
+        except PolicyViolation:
+            actual = None
+        if actual == current_name and not result.get("isError"):
+            # Inactive diagnostics can coexist with a successful complete tree.
+            # Exact current field evidence takes precedence over that heuristic.
+            proxy._prefer_complete_field_tree = True
+            return
+        # A different actual field is identity disagreement, not a transient
+        # empty tree. Stop without attempting to erase or overwrite it.
+        if actual is not None and actual != current_name:
+            raise AccessibilityRuntimeUnavailable("完整字段与已核验原名不一致；未输入或提交")
+        if attempt < 3:
+            time.sleep(_FIELD_READ_RETRY_DELAY_SECONDS)
+    if inactive_seen:
+        raise AccessibilityRuntimeUnavailable(
+            "MCP 连续三次完整字段读取仍失败（axRuntimeMode: inactive）；"
+            "已保留原名，需要恢复 MCP 字段读取服务，不是 iPad 锁屏。"
+        )
+    raise AccessibilityRuntimeUnavailable("清空前完整辅助功能树未读到一致的原名；未输入或提交")
 
 
 def _focus_ocr_default_name_field(proxy: SafeProxy, current_name: str) -> None:
@@ -73,6 +216,7 @@ def _focus_ocr_default_name_field(proxy: SafeProxy, current_name: str) -> None:
         base.ORIENTATION,
         current_name,
         minimum_confidence=0.70,
+        search_region=(0.10, 0.30, 0.70, 0.55),
     )
     x_ratio = (located.box.left + located.box.right) / (2.0 * located.image_width)
     y_ratio = located.box.center_y / located.image_height
@@ -95,6 +239,7 @@ def _focus_ocr_default_name_field(proxy: SafeProxy, current_name: str) -> None:
             "_expected_after": "rename text field focused",
         },
     )
+    _require_name_field_runtime(proxy, current_name)
 
 
 def _dialog_contains_exact_text(proxy: SafeProxy, text: str) -> bool:
@@ -132,7 +277,15 @@ def _task_switcher_overlay_active(proxy: SafeProxy) -> bool:
 
 
 def _wait_for_task_switcher_to_clear(proxy: SafeProxy) -> bool:
-    """Read only until the iPad overview no longer masks the rename dialog."""
+    """Read only until an overview clears, without trusting stale AX alone.
+
+    Stage Manager can leave a previous Dock node in the accessibility tree
+    after the real pixels have returned to Pokémon GO.  Treating that stale
+    node as a system overlay indefinitely freezes a fully visible, already
+    verified rename dialog.  A fresh local screenshot is authoritative here:
+    if it proves the rename dialog, return to the normal field-verification
+    path without tapping anything.
+    """
 
     if not (
         _persistent_task_switcher_wait_enabled()
@@ -147,15 +300,96 @@ def _wait_for_task_switcher_to_clear(proxy: SafeProxy) -> bool:
         ),
     )
     while _task_switcher_overlay_active(proxy):
-        base._next_snapshot(proxy, 3.0)
+        snapshot = base._next_snapshot(proxy, 3.0)
+        try:
+            if base.local_page_state(snapshot) == "RENAME_DIALOG":
+                emit(
+                    "status",
+                    message=(
+                        "改名弹窗已由当前游戏像素确认；忽略残留的 Dock 辅助功能节点，"
+                        "继续只读核验输入字段。"
+                    ),
+                )
+                return True
+        except (PolicyViolation, ValueError, OSError):
+            # A transient unreadable frame never authorizes a touch.  Keep the
+            # original read-only wait and let the next screenshot decide.
+            pass
     return True
+
+
+def _wait_for_detail_after_cancel(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
+    """Read only until a cancelled edit has returned to the same DETAIL page.
+
+    After a verified Cancel, a stale Stage Manager accessibility tree can keep
+    reporting Dock/card text long after the game pixels have changed.  The old
+    branch treated the moment that stale text disappeared as evidence that the
+    direct-detail route had failed, then let a legacy validation message abort
+    the batch.  A cancel never authorizes inventory navigation, so the only
+    safe recovery is to keep reading until the existing detail page itself is
+    proven again.  In particular, this helper never taps a card, launches the
+    game, or retries Cancel/OK.
+    """
+
+    wait_started = time.monotonic()
+    last_reported = wait_started
+    while True:
+        # Fresh local pixels are stronger than a retained Stage Manager AX
+        # tree.  In particular, a cancelled dialog can already be back on its
+        # original detail page while accessibility still describes the former
+        # keyboard/Dock surface; waiting for that stale text to change caused
+        # multi-hour no-progress loops.
+        try:
+            local_state = base.local_page_state(snapshot)
+            if local_state == "DETAIL":
+                return snapshot
+            if local_state == "RENAME_DIALOG":
+                # The bounded Cancel recovery already gave the game several
+                # read-only frames to close.  Continuing to wait for DETAIL
+                # here cannot make a visibly unchanged dialog disappear.  Let
+                # the batch layer decide whether its durable journal can
+                # safely resume the exact pending rename instead.
+                raise RenameCancelDidNotDismiss(snapshot)
+        except RenameCancelDidNotDismiss:
+            raise
+        except (PolicyViolation, ValueError, OSError):
+            pass
+        try:
+            base._validate_expected("DETAIL", snapshot)
+        except (PolicyViolation, ValueError):
+            snapshot = base._next_snapshot(proxy, 3.0)
+            now = time.monotonic()
+            if now - last_reported >= 15.0:
+                elapsed = max(0, int(now - wait_started))
+                emit(
+                    "status",
+                    message=(
+                        f"取消未提交编辑后仍在只读等待同一只详情页（已 {elapsed} 秒）；"
+                        "不会点击盒子卡片、OK、取消或重开游戏。"
+                    ),
+                )
+                last_reported = now
+            continue
+        return snapshot
 
 
 def _verified_entered_value_with_read_only_retry(
     proxy: SafeProxy, nickname: str
 ) -> str:
     last = ""
+    wait_started = time.monotonic()
     for attempt in range(1, _FIELD_READ_RETRY_LIMIT + 1):
+        emit(
+            "waiting",
+            screen="RENAME_DIALOG",
+            stage="昵称逐字核验",
+            reason="正在读取输入框的完整字符；未与目标逐字一致前不会点击 OK。",
+            attempt=attempt,
+            total=_FIELD_READ_RETRY_LIMIT,
+            elapsed_seconds=max(0, int(time.monotonic() - wait_started)),
+            next_action="只读核验完整昵称；重试耗尽则取消未提交编辑。",
+            user_action="无需操作；不要手动点 OK，以免跳过完整字符核验。",
+        )
         try:
             last = _verified_entered_value(proxy)
         except PolicyViolation:
@@ -226,12 +460,11 @@ def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
             # is enough to leave this one unrecorded and continue; the next
             # pass will still preserve it if the game happened to show a
             # custom name.
-            detail = base._next_snapshot(proxy, 0.5)
-            try:
-                base._validate_expected("DETAIL", detail)
-            except (PolicyViolation, ValueError):
-                raise cancel_error
+            detail = _wait_for_detail_after_cancel(
+                proxy, base._next_snapshot(proxy, 0.5)
+            )
             proxy.pending_name = None
+            emit("navigation", state="DETAIL")
             emit(
                 "status",
                 message=(
@@ -240,13 +473,11 @@ def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
                 ),
             )
             raise RenameFieldVerificationUnavailable(detail, actual) from cancel_error
-    last_error: Exception | None = None
     for attempt in range(1, _CANCEL_DETAIL_READ_LIMIT + 1):
         detail = base._next_snapshot(proxy, 1.5 if attempt == 1 else 1.0)
         try:
             base._validate_expected("DETAIL", detail)
         except (PolicyViolation, ValueError) as exc:
-            last_error = exc
             if attempt < _CANCEL_DETAIL_READ_LIMIT:
                 emit(
                     "status",
@@ -258,37 +489,29 @@ def _cancel_unverified_input(proxy: SafeProxy, actual: str) -> None:
                 continue
             break
         proxy.pending_name = None
+        emit("navigation", state="DETAIL")
         raise RenameFieldVerificationUnavailable(detail, actual)
 
-    if (
-        _persistent_task_switcher_wait_enabled()
-        and _task_switcher_overlay_active(proxy)
-    ):
-        emit(
-            "status",
-            message=(
-                "取消未提交改名后被 iPad 多任务切换层覆盖；后台保持运行并只读等待详情恢复，"
-                "不会重新点击盒子卡片。"
-            ),
-        )
-        while True:
-            detail = base._next_snapshot(proxy, 3.0)
-            try:
-                base._validate_expected("DETAIL", detail)
-            except (PolicyViolation, ValueError):
-                if _task_switcher_overlay_active(proxy):
-                    continue
-                raise
-            proxy.pending_name = None
-            raise RenameFieldVerificationUnavailable(detail, actual)
-
-    raise PolicyViolation(
-        "取消未提交改名后连续只读等待仍未验证到详情页；未重新点击盒子卡片"
-    ) from last_error
+    # Do not use stale Dock/card AX labels as a timeout condition.  Once the
+    # verified Cancel has been tapped, detail recovery is intentionally
+    # read-only and unbounded: the worker resumes only when the same Pokémon
+    # detail is visibly proven, never by trying a generic box/card route.
+    try:
+        detail = _wait_for_detail_after_cancel(proxy, detail)
+    except RenameCancelDidNotDismiss as still_open:
+        proxy.pending_name = None
+        raise RenameFieldVerificationUnavailable(still_open.snapshot, actual) from still_open
+    proxy.pending_name = None
+    emit("navigation", state="DETAIL")
+    raise RenameFieldVerificationUnavailable(detail, actual)
 
 
 def _submit_with_one_verified_retry(
-    proxy: SafeProxy, *, nickname: str, prefer_accessibility_first: bool = False
+    proxy: SafeProxy,
+    *,
+    nickname: str,
+    prefer_accessibility_first: bool = False,
+    initial_dialog: Snapshot | None = None,
 ):
     """Submit an exactly verified field with bounded, evidence-gated retries.
 
@@ -298,6 +521,9 @@ def _submit_with_one_verified_retry(
     failure.  Every retry here is authorized only after a fresh read proves
     that the same exact nickname is still in the live field.
     """
+
+    if initial_dialog is not None:
+        _wait_for_submit_environment(proxy, initial_dialog)
 
     for attempt in range(_SUBMIT_TAP_LIMIT):
         if attempt > 0:
@@ -333,7 +559,29 @@ def _submit_with_one_verified_retry(
 
         use_accessibility = prefer_accessibility_first or attempt > 0
         if not use_accessibility or not _tap_accessibility_ok(proxy):
-            tap_ok(proxy)
+            try:
+                tap_ok(proxy)
+            except PolicyViolation:
+                # A retry can arrive exactly as the previous OK begins to
+                # dismiss the dialog. In that transition frame OCR quite
+                # correctly cannot locate another OK control. Treating that
+                # absence as a rename failure used to stop a healthy batch.
+                # Do one fresh read only: a proven DETAIL is conclusive
+                # success, while every other page still fails safely without
+                # introducing an unproven extra tap.
+                if attempt == 0:
+                    raise
+                transition = base._next_snapshot(proxy, 1.25)
+                if transition.image and v14.robust_page_state(transition) == "DETAIL":
+                    emit(
+                        "status",
+                        message=(
+                            "重试时 OK 已随页面过渡消失；只读确认返回详情页，"
+                            "不会发送额外点击。"
+                        ),
+                    )
+                    return transition
+                raise
 
         candidate = None
         dialog_visible = False
@@ -494,7 +742,10 @@ def _tap_accessibility_cancel(proxy: SafeProxy) -> bool:
     # calibrated in-window Cancel anchor rather than reusing the portrait AX
     # point.  It is mapped through the freshly measured game-window bounds.
     if (
-        base.ORIENTATION == "STAGE_MANAGER_MAXIMIZED"
+        base.ORIENTATION in {
+            "STAGE_MANAGER_MAXIMIZED",
+            "STAGE_MANAGER_PORTRAIT_WINDOW",
+        }
         and observation.width is not None
         and observation.height is not None
         and observation.width > observation.height
@@ -560,7 +811,15 @@ def _commit_after_dismissing_keyboard(
     nickname: str,
 ) -> Snapshot:
     verified_before = proxy.verified_renames
-    _focus_ocr_default_name_field(proxy, current_name)
+    try:
+        _focus_ocr_default_name_field(proxy, current_name)
+    except AccessibilityRuntimeUnavailable as error:
+        emit("status", message=str(error) + " 尚未清空或输入；正在关闭未修改的名称窗口。")
+        try:
+            _cancel_unverified_input(proxy, current_name)
+        except RenameFieldVerificationUnavailable:
+            raise error
+        raise error
     count = _backspace_current_name(proxy, current_name)
     if _dialog_contains_exact_text(proxy, current_name):
         emit(
@@ -602,6 +861,7 @@ def _commit_after_dismissing_keyboard(
                     "_current_name": current_name,
                     "_species": species,
                     "_default_name_verified": True,
+                    "_fallback_default_field_verified": True,
                 },
             )
             entered_value = _verified_entered_value_with_read_only_retry(proxy, nickname)
@@ -625,6 +885,7 @@ def _commit_after_dismissing_keyboard(
 
     dismissed = dismiss_active_keyboard(proxy)
     prefer_accessibility_first = False
+    dialog = None
     if dismissed:
         dialog, prefer_accessibility_first = (
             _dialog_evidence_after_keyboard_dismiss(proxy)
@@ -640,6 +901,7 @@ def _commit_after_dismissing_keyboard(
         proxy,
         nickname=nickname,
         prefer_accessibility_first=prefer_accessibility_first,
+        initial_dialog=dialog,
     )
 
     _finalize_verified_commit(

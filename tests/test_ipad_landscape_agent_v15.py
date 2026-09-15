@@ -8,6 +8,7 @@ from unittest.mock import patch
 from pogo_iphone_renamer import ipad_landscape_agent_v15 as v15
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.ipad_landscape_agent_v15 import (
+    DeviceLockRecoveryRequired,
     device_screen_state,
     refresh_game_foreground_capture,
     restart_game_for_capture,
@@ -40,6 +41,22 @@ class CaptureStateTests(unittest.TestCase):
             result = wait_for_unlocked_snapshot(proxy, locked)
         self.assertIs(result, unlocked)
         refresh.assert_called_once_with(proxy)
+
+    def test_mutating_caller_must_reenter_after_unlock(self) -> None:
+        proxy = mock.Mock()
+        locked = Snapshot(text="输入密码", image="nonblack-lock-screen")
+        unlocked = Snapshot(text="Pokemon GO HP kg", image="game-frame")
+        with mock.patch.object(
+            v15, "device_screen_state", side_effect=[(True, True), (False, True)]
+        ), mock.patch.object(v15.time, "sleep"), mock.patch.object(
+            v15, "screen_snapshot", return_value=unlocked
+        ):
+            with self.assertRaises(DeviceLockRecoveryRequired) as raised:
+                wait_for_unlocked_snapshot(
+                    proxy, locked, require_safe_reentry=True
+                )
+
+        self.assertIs(raised.exception.snapshot, unlocked)
 
     def test_initial_locked_black_frame_waits_then_returns_visible_frame(self) -> None:
         black = SimpleNamespace(image="black")

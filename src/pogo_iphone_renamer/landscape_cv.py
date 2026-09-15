@@ -305,6 +305,26 @@ def stage_manager_upright_ratio_to_touch(
 
 def rotate_mcp_image_upright(image_base64: str, orientation: str) -> Image.Image:
     image = Image.open(io.BytesIO(base64.b64decode(image_base64))).convert("RGB")
+    if orientation == "PORTRAIT_FULLSCREEN":
+        # Some iPad7,2 MCP builds switch from their historical Stage Manager
+        # desktop capture to an already-upright, full-screen Pokémon GO
+        # frame. Rotating/cropping that frame with the old window profile
+        # removes the title row and turns a horizontal pager gesture into a
+        # vertical scroll.
+        return image
+    if orientation == "STAGE_MANAGER_PORTRAIT_WINDOW":
+        # iPad7,2/iPadOS 17 encodes the full landscape Stage Manager desktop
+        # sideways. Its Pokémon GO window is an upright portrait card within
+        # that desktop, unlike the old iPad14,6 sideways-game layout.
+        landscape = image.rotate(90, expand=True) if image.width < image.height else image
+        return landscape.crop(
+            (
+                round(landscape.width * 0.232),
+                round(landscape.height * 0.049),
+                round(landscape.width * 0.768),
+                round(landscape.height * 0.979),
+            )
+        ).resize((1024, 1366))
     if orientation == "STAGE_MANAGER_MAXIMIZED":
         # A portrait-only game in iPad Stage Manager is rendered sideways in
         # a maximized landscape window.  Normalize only that verified game
@@ -360,6 +380,74 @@ def rotate_mcp_image_upright(image_base64: str, orientation: str) -> Image.Image
     if orientation == "ROTATED_90_CLOCKWISE":
         return image.rotate(-90, expand=True)
     return image
+
+
+def is_fullscreen_portrait_game_frame(image_base64: str) -> bool:
+    """Recognize a complete upright Pokémon GO detail frame without OCR.
+
+    The iPad7,2 service may change its screenshot encoding after an app or
+    SpringBoard update while keeping its advertised 1366×1024 touch space.
+    A normal detail screen has a broad light information card across the
+    lower page and a coloured presentation area directly above it. The old
+    Stage Manager desktop has neither relationship in the raw portrait image
+    (its game view is sideways or inset), so this local pixel check can select
+    the correct read-only normalization profile.
+    """
+
+    try:
+        image = Image.open(io.BytesIO(base64.b64decode(image_base64))).convert("RGB")
+    except (OSError, ValueError, base64.binascii.Error):
+        return False
+    if image.width >= image.height or image.width < 200 or image.height < 300:
+        return False
+    width, height = image.size
+    # A sideways Stage Manager appraisal can also make 26% of the whole
+    # middle crop white. A full portrait detail card must span BOTH sides,
+    # not only the left side of a rotated game window.
+    for left, right in ((0.08, 0.30), (0.70, 0.92)):
+        side = image.crop((round(width * left), round(height * 0.49),
+                           round(width * right), round(height * 0.75))).resize((20, 24))
+        pixels = tuple(side.getdata())
+        if sum(min(pixel) >= 220 for pixel in pixels) / len(pixels) < 0.50:
+            return False
+        # A large pale Pokemon or a white animation can fill the OTHER side
+        # of a sideways window too. Full-screen portrait details additionally
+        # keep the lower information panel across both sides, below the bottom
+        # edge of the calibrated Stage Manager window (about 77% raw height).
+        # Wallpaper outside that window must not become a new touch profile.
+        lower_side = image.crop((round(width * left), round(height * 0.80),
+                                 round(width * right), round(height * 0.86))).resize((20, 12))
+        lower_pixels = tuple(lower_side.getdata())
+        if sum(min(pixel) >= 220 for pixel in lower_pixels) / len(lower_pixels) < 0.60:
+            return False
+    card = image.crop(
+        (
+            round(width * 0.05),
+            round(height * 0.39),
+            round(width * 0.95),
+            round(height * 0.80),
+        )
+    ).resize((54, 48))
+    presentation = image.crop(
+        (
+            round(width * 0.12),
+            round(height * 0.06),
+            round(width * 0.88),
+            round(height * 0.36),
+        )
+    ).resize((42, 28))
+    card_pixels = tuple(card.getdata())
+    presentation_pixels = tuple(presentation.getdata())
+    light_card_ratio = sum(
+        1 for red, green, blue in card_pixels if min(red, green, blue) >= 220
+    ) / len(card_pixels)
+    colourful_presentation_ratio = sum(
+        1
+        for red, green, blue in presentation_pixels
+        if max(red, green, blue) - min(red, green, blue) >= 22
+        and max(red, green, blue) >= 105
+    ) / len(presentation_pixels)
+    return light_card_ratio >= 0.26 and colourful_presentation_ratio >= 0.18
 
 
 def image_to_base64_jpeg(image: Image.Image, quality: int = 92) -> str:

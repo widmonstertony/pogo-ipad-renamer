@@ -43,17 +43,18 @@ python launcher_ipad_landscape_v9.py
 
 ## macOS 启动
 
-支持 Intel 与 Apple Silicon Mac。安装带 Tk 的 Python 3.11+（推荐 python.org 官方
-安装包），首次右键打开：
+支持 Intel 与 Apple Silicon Mac。安装 Python 3.11+ 和 Xcode Command Line Tools
+（`xcode-select --install`），首次右键打开：
 
 ```text
 启动-PokemonGO-整理助手-macOS.command
 ```
 
-启动器会先校验 Python 版本和 Tk，在仓库内创建 `.venv`，安装 RapidOCR、ONNX
-Runtime 和 Pillow，然后打开同一套 GUI。依赖与 `pyproject.toml` 没有变化时，后续
-双击不会再次访问网络。若使用 Homebrew Python 且提示缺少 Tk，请安装与 Python
-版本匹配的 `python-tk`；也可临时用环境变量 `POGO_PYTHON` 指定解释器。
+启动器会先在仓库内创建 `.venv`，安装 RapidOCR、ONNX Runtime 和 Pillow；随后构建
+并打开面向 macOS 27 的原生 SwiftUI App。界面使用系统标准控件、系统语义色和 SF Symbols；
+在“偏好设置”中可即时切换系统/浅色/深色外观，以及系统/中文/English 界面语言，选择会在
+下次启动时保留。依赖与界面源码没有变化时，后续双击不会再次联网或重新编译；也可临时用
+环境变量 `POGO_PYTHON` 指定解释器。
 
 从 GitHub ZIP 下载后若双击没有执行权限，在终端运行一次：
 

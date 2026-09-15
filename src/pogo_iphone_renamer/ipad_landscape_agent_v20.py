@@ -13,19 +13,30 @@ from .ipad_landscape_agent_v10 import _field_value, _mark_rename_observation
 from .ipad_landscape_agent_v12 import _backspace_current_name
 from .ipad_landscape_agent_v5 import exact_name_field
 from .local_ocr import ocr_mcp_screenshot, rename_dialog_visible
-from .native_agent import emit, tool_result_message
+from .native_agent import emit
+from .protocol import text_from_content
 from .policy import PolicyViolation
 from .rename_controls_v20 import tap_cancel, tap_ok
 from .server import SafeProxy
 
 
 def _field_value_from_all_elements(proxy: SafeProxy) -> str:
-    result = proxy.call_tool("get_ui_elements", {})
-    message = tool_result_message("get_ui_elements", result)
-    return exact_name_field(Snapshot(str(message.get("content", "")), None))
+    # Stage Manager may mark the onscreen native text field as non-visible.
+    # Use the complete tree for text only, never for offscreen touch targets.
+    result = proxy.call_tool("get_ui_elements", {
+        "visible_only": False, "clickable_only": False, "limit": 160,
+    })
+    if result.get("isError"):
+        raise PolicyViolation("完整辅助功能树读取失败；未核验昵称字段")
+    # This is deterministic verification, not a model prompt. The prompt
+    # formatter truncates at 48k, leaving large AX JSON incomplete and making
+    # an actually present Unicode field appear unreadable.
+    return exact_name_field(Snapshot(text_from_content(result), None))
 
 
 def _verified_entered_value(proxy: SafeProxy) -> str:
+    if getattr(proxy, "_prefer_complete_field_tree", False):
+        return _field_value_from_all_elements(proxy)
     try:
         return _field_value(proxy)
     except PolicyViolation:

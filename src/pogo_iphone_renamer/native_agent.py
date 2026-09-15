@@ -78,6 +78,9 @@ def normalize_tool_name(name: str, available: set[str]) -> str:
 
 
 def tool_result_message(name: str, result: dict[str, Any]) -> dict[str, Any]:
+    from .protocol import separate_inline_screenshot
+
+    result = separate_inline_screenshot(result)
     texts: list[str] = []
     images: list[str] = []
     for item in result.get("content", []):
@@ -251,4 +254,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

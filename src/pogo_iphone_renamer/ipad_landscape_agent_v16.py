@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from . import ipad_landscape_agent as base
@@ -31,7 +32,8 @@ _POST_PENCIL_READ_ONLY_RECHECKS = 4
 # publish the actual dialog only tens of seconds later.  These are reads only;
 # keeping the same verified DETAIL frame avoids both a second touch and a
 # false terminal failure while the transition is still in flight.
-_CALIBRATED_PENCIL_DIALOG_RECHECKS = 54
+_CALIBRATED_PENCIL_DIALOG_RECHECKS = 6
+_PERSISTENT_PENCIL_DIALOG_RECHECKS = 3
 
 
 class RenamePencilLocalizationUnavailable(PolicyViolation):
@@ -124,6 +126,54 @@ def _dynamic_pencil_coordinates(
         y_ratio,
         geometry=base.current_stage_geometry(proxy),
     )
+
+
+def _strict_dynamic_pencil_coordinates(
+    proxy: SafeProxy, detail: Snapshot, current_name: str
+) -> tuple[float, float]:
+    """Locate the same proven name again before a transport-level retry.
+
+    Unlike the initial pencil lookup, this retry path deliberately has no
+    calibrated-name fallback.  A repeated navigation tap is allowed only
+    while a fresh screenshot still contains the exact same species name in
+    the detail name row; a manual swipe or any identity ambiguity stops it.
+    """
+
+    _require_visual_detail(detail)
+    if not detail.image:
+        raise PolicyViolation("重试铅笔前详情页截图缺失")
+    observation = proxy.observation
+    if observation is None or observation.width is None or observation.height is None:
+        raise PolicyViolation("重试铅笔前 MCP 未返回触控空间")
+    base._remember_stage_geometry(proxy, detail)
+    located = locate_exact_name_from_mcp(
+        detail.image,
+        base.ORIENTATION,
+        current_name,
+        minimum_confidence=0.70,
+    )
+    x_ratio, y_ratio = dynamic_pencil_point(
+        located,
+        observation_width=1.0,
+        observation_height=1.0,
+        extra_gap=33.0,
+    )
+    return base.upright_ratio_to_touch(
+        observation.width,
+        observation.height,
+        x_ratio,
+        y_ratio,
+        geometry=base.current_stage_geometry(proxy),
+    )
+
+
+def _persistent_pencil_retry_enabled() -> bool:
+    return os.getenv("POGO_PERSIST_CAPTURE_WAIT", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _static_pencil_coordinates(
@@ -371,6 +421,58 @@ def open_dynamic_rename_from_detail(
         raise PolicyViolation(
             "备用铅笔点击后连续只读等待仍未回到详情或验证改名弹窗；未输入文字"
         )
+    if _persistent_pencil_retry_enabled():
+        emit(
+            "status",
+            message=(
+                "MCP 已接收铅笔点击但游戏仍停在同一详情页；后台保持运行。"
+                "每轮会先重新精确确认同一名称，再重试一次铅笔，不会输入或翻页。"
+            ),
+        )
+        retry = 0
+        detail = resolved
+        while True:
+            retry += 1
+            detail = base._next_snapshot(proxy, 2.0)
+            try:
+                x, y = _strict_dynamic_pencil_coordinates(
+                    proxy, detail, current_name
+                )
+            except PolicyViolation as exc:
+                raise PolicyViolation(
+                    "铅笔持续重试前已无法精确确认仍是同一只宝可梦；未输入文字"
+                ) from exc
+            emit(
+                "waiting",
+                screen="DETAIL",
+                stage="打开改名窗口",
+                reason="MCP 接受点击但游戏尚未打开改名框；仍在同一只详情页。",
+                attempt=retry,
+                next_action="重新确认当前完整名称后，再点击一次名称旁铅笔。",
+                user_action="无需操作；后台不会翻页、输入昵称或重启游戏。",
+                message=f"铅笔无响应恢复第 {retry} 轮：同一名称已重新确认，正在重试。",
+            )
+            _tap_dynamic_pencil_at(proxy, x, y)
+            resolved = _wait_for_dialog_or_detail_after_pencil(
+                proxy,
+                current_name,
+                base._next_snapshot(proxy, 0.5),
+                detail_stability_rechecks=_PERSISTENT_PENCIL_DIALOG_RECHECKS,
+            )
+            if (
+                resolved is not None
+                and base.local_page_state(resolved) == "RENAME_DIALOG"
+            ):
+                emit(
+                    "status",
+                    message=f"铅笔在第 {retry} 轮恢复点击后生效，改名窗口验证通过。",
+                )
+                return resolved
+            if resolved is None:
+                raise PolicyViolation(
+                    "铅笔恢复点击后页面不再是详情或改名窗口；未输入文字"
+                )
+            detail = resolved
     raise PolicyViolation("动态与已校准备用铅笔均未打开已验证改名窗口；未输入文字")
 
 

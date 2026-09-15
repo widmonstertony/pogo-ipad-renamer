@@ -6,14 +6,18 @@ from unittest.mock import Mock, patch
 
 from pogo_iphone_renamer.appraisal_agent import Snapshot
 from pogo_iphone_renamer.ipad_landscape_agent_v22 import (
+    RenameCancelDidNotDismiss,
     RenameFieldVerificationUnavailable,
     _cancel_unverified_input,
     _commit_after_dismissing_keyboard,
     _dialog_evidence_after_keyboard_dismiss,
     _finalize_verified_commit,
+    _location_error_banner_visible,
+    _location_error_banner_visible,
     _submit_with_one_verified_retry,
     _tap_accessibility_cancel,
     _tap_accessibility_ok,
+    _wait_for_detail_after_cancel,
     _wait_for_task_switcher_to_clear,
 )
 from pogo_iphone_renamer.policy import PolicyViolation
@@ -35,6 +39,57 @@ class _Proxy:
 
 
 class BatchVerifiedCommitTests(unittest.TestCase):
+
+    def test_location_error_12_banner_is_detected_despite_ocr_variant(self) -> None:
+        avoidance = [
+            SimpleNamespace(text="無法偵側目前位置 (12)"),
+            SimpleNamespace(text="設定暱稱"),
+        ]
+        self.assertTrue(_location_error_banner_visible(avoidance))
+        self.assertFalse(
+            _location_error_banner_visible(
+                [SimpleNamespace(text="設定暱稱"), SimpleNamespace(text="OK")]
+            )
+        )
+
+    def test_location_error_12_banner_survives_common_ocr_typo(self) -> None:
+        self.assertTrue(
+            _location_error_banner_visible(
+                [SimpleNamespace(text="無法偵側目前位置 (12)")]
+            )
+        )
+        self.assertFalse(
+            _location_error_banner_visible(
+                [SimpleNamespace(text="設定暱稱"), SimpleNamespace(text="OK")]
+            )
+        )
+
+    def test_cancel_wait_accepts_current_pixel_detail_despite_stale_ax(self) -> None:
+        detail = Snapshot("Dock stale", "detail")
+        proxy = SimpleNamespace()
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base.local_page_state",
+            return_value="DETAIL",
+        ) as local_state, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._validate_expected"
+        ) as validate:
+            returned = _wait_for_detail_after_cancel(proxy, detail)
+
+        self.assertIs(returned, detail)
+        local_state.assert_called_once_with(detail)
+        validate.assert_not_called()
+
+    def test_cancel_wait_escalates_a_visibly_unchanged_rename_dialog(self) -> None:
+        dialog = Snapshot("rename", "dialog")
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base.local_page_state",
+            return_value="RENAME_DIALOG",
+        ):
+            with self.assertRaises(RenameCancelDidNotDismiss) as raised:
+                _wait_for_detail_after_cancel(SimpleNamespace(), dialog)
+
+        self.assertIs(raised.exception.snapshot, dialog)
+
     def test_task_switcher_waits_without_touching_rename_dialog(self) -> None:
         proxy = SimpleNamespace(
             observation=SimpleNamespace(text="程序坞\n账号安全")
@@ -56,6 +111,28 @@ class BatchVerifiedCommitTests(unittest.TestCase):
 
         next_snapshot.assert_called_once_with(proxy, 3.0)
         emit.assert_called_once()
+
+    def test_task_switcher_stale_ax_yields_to_visible_rename_dialog(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(text="程序坞\n账号安全")
+        )
+        snapshot = Snapshot("rename dialog", "dialog")
+
+        with patch.dict(
+            "os.environ", {"POGO_PERSIST_CAPTURE_WAIT": "true"}, clear=False
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            return_value=snapshot,
+        ) as next_snapshot, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base.local_page_state",
+            return_value="RENAME_DIALOG",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit",
+        ) as emit:
+            self.assertTrue(_wait_for_task_switcher_to_clear(proxy))
+
+        next_snapshot.assert_called_once_with(proxy, 3.0)
+        self.assertEqual(emit.call_count, 2)
 
     def test_keyboard_dismiss_waits_through_one_empty_ocr_frame(self) -> None:
         blank = Snapshot("", "blank")
@@ -288,6 +365,40 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         self.assertIs(returned, detail)
         self.assertEqual(ok.call_count, 2)
 
+    def test_retry_ok_disappearance_accepts_proven_detail_without_another_tap(self) -> None:
+        nickname = "淚眼蜥⓯⓫⓬⁸⁴"
+        dialog = Snapshot("", "dialog")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = SimpleNamespace(pending_name=nickname)
+
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            side_effect=[dialog, dialog, detail],
+        ) as read, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.ocr_mcp_screenshot",
+            return_value=(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.rename_dialog_visible",
+            side_effect=[True, True],
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.v14.robust_page_state",
+            return_value="DETAIL",
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._verified_entered_value_with_read_only_retry",
+            return_value=nickname,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22._tap_accessibility_ok",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.tap_ok",
+            side_effect=[None, PolicyViolation("OCR OK disappeared during transition")],
+        ) as ok, patch("pogo_iphone_renamer.ipad_landscape_agent_v22.emit"):
+            returned = _submit_with_one_verified_retry(proxy, nickname=nickname)
+
+        self.assertIs(returned, detail)
+        self.assertEqual(ok.call_count, 2)
+        self.assertEqual(read.call_count, 3)
+
     def test_empty_accessibility_field_is_cancelled_without_submit(self) -> None:
         nickname = "滑滑小子❻❷⓬⁴⁴"
         dialog = Snapshot("", "dialog")
@@ -465,6 +576,47 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         self.assertEqual(validate.call_count, 2)
         self.assertIsNone(proxy.pending_name)
 
+    def test_cancel_never_falls_back_to_card_navigation_after_stale_overlay(self) -> None:
+        """A post-cancel stale Dock tree must keep the recovery read-only."""
+
+        dialog = Snapshot("rename dialog", "dialog")
+        transition = Snapshot("Stage Manager Dock", "transition")
+        detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(token="token", text="程序坞\nPokémon GO"),
+            pending_name="木木梟❼⓬⓭⁷¹",
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.dismiss_active_keyboard",
+            return_value=False,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.rename_dialog_visible",
+            return_value=True,
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.ocr_mcp_screenshot",
+            return_value=(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.tap_cancel"
+        ) as cancel, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._next_snapshot",
+            side_effect=[dialog, transition, transition, transition, transition, transition, detail],
+        ) as read, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.base._validate_expected",
+            side_effect=[PolicyViolation("transition")] * 6 + [None],
+        ) as validate, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v22.emit"
+        ):
+            with self.assertRaises(RenameFieldVerificationUnavailable) as raised:
+                _cancel_unverified_input(proxy, "木木梟")
+
+        cancel.assert_called_once_with(proxy)
+        self.assertIs(raised.exception.snapshot, detail)
+        self.assertEqual(read.call_count, 7)
+        # The final fresh local DETAIL frame is sufficient even while AX is
+        # still stale, so it need not call the legacy AX validator again.
+        self.assertEqual(validate.call_count, 6)
+        self.assertIsNone(proxy.pending_name)
+
     def test_missing_cancel_control_recovers_from_a_verified_detail_without_retrying_a_tap(self) -> None:
         dialog = Snapshot("rename dialog", "dialog")
         detail = Snapshot("CP 100 20 / 20 HP 1 kg", "detail")
@@ -502,7 +654,9 @@ class BatchVerifiedCommitTests(unittest.TestCase):
         ocr_cancel.assert_called_once_with(proxy)
         self.assertIs(raised.exception.snapshot, detail)
         self.assertEqual(read.call_count, 2)
-        validate.assert_called_once_with("DETAIL", detail)
+        # Pixel-local DETAIL proof intentionally bypasses the stale AX
+        # validator on this recovery path.
+        validate.assert_not_called()
         self.assertIsNone(proxy.pending_name)
         self.assertIn("取消控件在最终截图中已消失", emit.call_args.kwargs["message"])
 

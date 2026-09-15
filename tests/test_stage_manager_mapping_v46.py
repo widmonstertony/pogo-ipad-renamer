@@ -14,10 +14,36 @@ from pogo_iphone_renamer.landscape_cv import (
     StageManagerGeometry,
     set_preferred_stage_manager_geometry,
     stage_manager_geometry,
+    is_fullscreen_portrait_game_frame,
 )
 
 
 class StageManagerMappingTests(unittest.TestCase):
+    def test_bright_pokemon_in_sideways_window_is_not_a_portrait_layout_change(self):
+        image = Image.new("RGB", (1024, 1366), (185, 55, 30))
+        draw = ImageDraw.Draw(image)
+        # Both middle side probes are white, as during a large pale Pokemon's
+        # animation. The panel still ends at the Stage Manager window edge;
+        # the lower desktop is not part of a full-screen information card.
+        draw.rectangle((24, 318, 1000, 1050), fill="white")
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        self.assertFalse(is_fullscreen_portrait_game_frame(base64.b64encode(output.getvalue()).decode()))
+
+    def test_sideways_detail_white_panel_is_not_fullscreen_portrait(self):
+        image = Image.new('RGB', (1024, 1366), (185, 55, 30))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((24, 318, 1000, 1050), fill=(35, 140, 190))
+        draw.rectangle((24, 332, 603, 1034), fill='white')
+        output = io.BytesIO()
+        image.save(output, format='PNG')
+        self.assertFalse(is_fullscreen_portrait_game_frame(base64.b64encode(output.getvalue()).decode()))
+        image = Image.new('RGB', (1024, 1366), (35, 140, 190))
+        ImageDraw.Draw(image).rectangle((24, 530, 1000, 1365), fill='white')
+        output = io.BytesIO()
+        image.save(output, format='PNG')
+        self.assertTrue(is_fullscreen_portrait_game_frame(base64.b64encode(output.getvalue()).decode()))
+
     def tearDown(self) -> None:
         set_preferred_stage_manager_geometry(None)
 

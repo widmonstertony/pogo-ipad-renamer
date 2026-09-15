@@ -10,6 +10,7 @@ from pogo_iphone_renamer.ipad_landscape_agent_v16 import (
     _locate_dynamic_pencil_with_read_only_retry,
     _require_visual_detail,
     _static_pencil_coordinates,
+    _strict_dynamic_pencil_coordinates,
     _wait_for_dialog_or_detail_after_pencil,
     dynamic_pencil_point,
 )
@@ -108,6 +109,38 @@ class DynamicPencilTests(unittest.TestCase):
             )
 
         require_detail.assert_not_called()
+
+    def test_persistent_retry_requires_fresh_exact_name_without_calibrated_fallback(self) -> None:
+        proxy = SimpleNamespace(
+            observation=SimpleNamespace(width=1366, height=1024, token="fresh")
+        )
+        detail = Snapshot("detail", "frame")
+        exact = LocatedText(
+            OCRTextBox("烈咬陸鯊", .99, 542, 505, 822, 552), 1366, 1024
+        )
+        with patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16._require_visual_detail"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.locate_exact_name_from_mcp",
+            return_value=exact,
+        ) as locate, patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base._remember_stage_geometry"
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.current_stage_geometry",
+            return_value=object(),
+        ), patch(
+            "pogo_iphone_renamer.ipad_landscape_agent_v16.base.upright_ratio_to_touch",
+            return_value=(662.0, 588.0),
+        ):
+            point = _strict_dynamic_pencil_coordinates(proxy, detail, "烈咬陸鯊")
+
+        self.assertEqual(point, (662.0, 588.0))
+        locate.assert_called_once_with(
+            "frame",
+            unittest.mock.ANY,
+            "烈咬陸鯊",
+            minimum_confidence=0.70,
+        )
 
     def test_rejects_text_outside_name_row(self) -> None:
         located = LocatedText(

@@ -70,6 +70,16 @@ def _navigate_with_read_only_measurement_retry(proxy, snapshot):
         emit("status", message="验证到鉴定对白未显示 IV 条；只推进一次对白。")
         base._tap(proxy, "APPRAISAL_DIALOG")
         for attempt in range(1, _READ_ONLY_RETRY_LIMIT + 1):
+            emit(
+                "waiting",
+                stage="鉴定条读取",
+                reason="鉴定对白已推进，正在等待可稳定测量的 A/D/S 条。",
+                attempt=attempt,
+                total=_READ_ONLY_RETRY_LIMIT,
+                elapsed_seconds=attempt,
+                next_action="只读获取下一张鉴定页截图；连续不可读会保留原名并回到详情。",
+                user_action="无需操作；后台不会重复点击对白或改名。",
+            )
             retry = base._next_snapshot(
                 proxy,
                 _FIRST_DIALOG_READ_DELAY_SECONDS if attempt == 1 else 1.5,

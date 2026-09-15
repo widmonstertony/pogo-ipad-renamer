@@ -22,7 +22,7 @@ class LocalOCRSafetyTests(unittest.TestCase):
         with self.assertRaises(PolicyViolation):
             exact_species_from_lines((OCRLine("我的輕飄飄", 0.99),))
 
-    def test_rename_dialog_requires_all_three_controls(self) -> None:
+    def test_rename_dialog_requires_title_and_exact_ok_control(self) -> None:
         self.assertTrue(
             rename_dialog_visible(
                 (
@@ -32,9 +32,10 @@ class LocalOCRSafetyTests(unittest.TestCase):
                 )
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             rename_dialog_visible((OCRLine("設定暱稱", 0.98), OCRLine("OK", 0.99)))
         )
+        self.assertFalse(rename_dialog_visible((OCRLine("設定暱稱", 0.98),)))
 
     def test_rename_dialog_accepts_ios_merged_done_cancel_token(self) -> None:
         self.assertTrue(

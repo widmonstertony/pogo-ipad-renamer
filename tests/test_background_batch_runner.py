@@ -47,6 +47,24 @@ class _FakeProcess:
         return None
 
 
+class _DisconnectedProcess:
+    pid = 9876
+
+    def __init__(self) -> None:
+        self.stdout = io.StringIO(
+            "MCP request failed: <urlopen error [Errno 65] No route to host>\n"
+        )
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self) -> int:
+        return 1
+
+    def terminate(self) -> None:
+        return None
+
+
 class BackgroundBatchRunnerTests(unittest.TestCase):
     def test_worker_uses_its_own_interpreter(self) -> None:
         command = worker_command("rename")
@@ -80,6 +98,8 @@ class BackgroundBatchRunnerTests(unittest.TestCase):
             state = json.loads((root / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "finished")
             self.assertEqual(state["exit_code"], 0)
+            self.assertEqual(state["progress"]["current"], 2)
+            self.assertEqual(state["progress"]["verification"]["completed"], 0)
             log = (root / "worker.log").read_text(encoding="utf-8")
             self.assertIn("后台批量工作进程已启动", log)
             self.assertIn("后台任务正常结束", log)
@@ -146,6 +166,32 @@ class BackgroundBatchRunnerTests(unittest.TestCase):
             )
         )
         self.assertFalse(_is_recoverable_mcp_disconnect(["当前不是详情页"] ))
+
+    def test_transport_disconnect_waits_before_restarting_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            awake = _FakeAwake()
+            sleeps: list[float] = []
+            processes = iter((_DisconnectedProcess(), _FakeProcess()))
+
+            code = run_background_batch(
+                "rename",
+                root=root,
+                environment={
+                    "POGO_BACKGROUND_LOG": str(root / "worker.log"),
+                    "POGO_BATCH_STATE": str(root / "state.json"),
+                    "IPHONE_MCP_HEALTH_URL": "http://device/health",
+                },
+                popen=lambda *_args, **_kwargs: next(processes),
+                awake_factory=lambda: awake,  # type: ignore[arg-type]
+                health_check=lambda _url: True,
+                sleep=sleeps.append,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(sleeps, [5.0])
+            log = (root / "worker.log").read_text(encoding="utf-8")
+            self.assertIn("传输恢复前等待 5 秒", log)
 
     def test_stop_request_signals_live_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

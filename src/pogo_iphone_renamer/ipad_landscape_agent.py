@@ -27,6 +27,26 @@ from .species_db import traditional_chinese_species
 
 
 ORIENTATION = "STAGE_MANAGER_MAXIMIZED"
+WEIGHT_TOKEN = re.compile(r"^\d+(?:\.\d+)?\s*kg$", re.IGNORECASE)
+HEIGHT_TOKEN = re.compile(r"^\d+(?:\.\d+)?\s*m$", re.IGNORECASE)
+
+# iPad7,2 / iPadOS 17's MCP service reports a 1366x1024 landscape touch
+# surface, while its screenshot endpoint returns that same surface as a
+# 1024x1366 portrait JPEG.  Decode the screenshot for vision, but retain the
+# MCP-reported landscape coordinate system for writes: the game window lives
+# in this calibrated rectangle in the decoded landscape frame.
+_PORTRAIT_WINDOW_LEFT = 0.232
+_PORTRAIT_WINDOW_RIGHT = 0.768
+_PORTRAIT_WINDOW_TOP = 0.049
+_PORTRAIT_WINDOW_BOTTOM = 0.979
+# Verified on the new iPad: the active appraisal dialogue/close strip is here.
+# The shared legacy .9473 point sits below it in the rendered speech bubble.
+_PORTRAIT_WINDOW_APPRAISAL_DIALOG_Y = 0.940
+# iPad7,2 MCP 1.2.5 divides HID points by landscape UIScreen bounds, but
+# digitizer coordinates follow the portrait capture. Rotate AND normalize:
+# the CP458 Cubchoo menu was visually verified at HID (128.1,729.4) for
+# portrait screenshot pixel (96,973), not landscape pixel (973,928).
+_PORTRAIT_WINDOW_INPUT_MAPPING = "digitizer_normalized"
 
 # Ratios are expressed in the native 1366x1024 landscape touch space.  The
 # screenshot decoder independently accepts both the old rotated 1024x1366
@@ -154,7 +174,10 @@ def local_page_state(snapshot: Snapshot) -> str:
             pass
     text = _normalized_text(snapshot)
     local_lines = ()
-    if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and snapshot.image:
+    if snapshot.image and ORIENTATION in {
+        "STAGE_MANAGER_MAXIMIZED",
+        "STAGE_MANAGER_PORTRAIT_WINDOW",
+    }:
         # MCP accessibility/OCR describes the whole Stage Manager desktop and
         # often omits the rotated game window.  Reuse the canonicalized local
         # game crop so the base navigation cannot contradict the enhanced v14
@@ -184,6 +207,22 @@ def local_page_state(snapshot: Snapshot) -> str:
                 return "RENAME_DIALOG"
         except Exception:
             pass
+    # The expanded detail menu can cover the nickname/HP fields completely.
+    # Its exact, non-destructive Appraise action is then stronger page evidence
+    # than the otherwise absent DETAIL fields.  Treat it as a detail descendant
+    # so a resumed direct worker selects only this existing menu action instead
+    # of treating the visual occlusion as MAP or attempting to reopen menus.
+    appraisal_menu_labels = {
+        "調查寶可夢",
+        "调查宝可梦",
+        "寶可夢鑑定",
+        "宝可梦鉴定",
+    }
+    if any(
+        line.confidence >= 0.80 and line.text.strip() in appraisal_menu_labels
+        for line in local_lines
+    ):
+        return "DETAIL_MENU"
     has_visible_species = _has_visible_detail_species(local_lines)
     # The team-leader text sits above the still-visible detail page and does
     # not include the red IV tracks yet.  Treat it as its own state so a
@@ -203,6 +242,33 @@ def local_page_state(snapshot: Snapshot) -> str:
         return "INVENTORY"
     if "hp" in text and ("kg" in text or re.search(r"\d+(?:\.\d+)?m\b", text)):
         return "DETAIL"
+    if local_lines:
+        # On iPad7,2 the upper part of the portrait game window can sit below
+        # the permanent Stage Manager recent-app strip.  OCR then misses the
+        # white CP/HP title but still reads the immutable size pair and the
+        # Pokémon-detail-only action row.  Those three independent local
+        # signals are stronger than the surrounding desktop accessibility
+        # text (for example the system Settings card), and cannot describe the
+        # green Poké Ball main menu.
+        local_values = {
+            line.text.strip().casefold()
+            for line in local_lines
+            if line.confidence >= 0.80
+        }
+        has_weight = any(WEIGHT_TOKEN.fullmatch(value) for value in local_values)
+        has_height = any(HEIGHT_TOKEN.fullmatch(value) for value in local_values)
+        detail_actions = {
+            "強化",
+            "强化",
+            "進化",
+            "进化",
+            "新攻擊招式",
+            "新攻击招式",
+            "替換夥伴",
+            "替换伙伴",
+        }
+        if has_weight and has_height and local_values.intersection(detail_actions):
+            return "DETAIL"
     # The current pale-green main menu occupies about 56% near-white pixels in
     # the canonical Stage Manager game crop.  The previous 58% cutoff rejected
     # a proven successful Poké Ball tap and mislabeled the open menu as MAP.
@@ -223,7 +289,9 @@ def _tap(proxy: SafeProxy, key: str) -> None:
     # already exposes one exact, harmless label for the only permitted action.
     # Prefer that current-pixel proof so a compressed card never turns a tap
     # into a click on a different menu row.
-    if key == "DETAIL_MENU" and ORIENTATION == "STAGE_MANAGER_MAXIMIZED":
+    if key == "DETAIL_MENU" and ORIENTATION in {
+        "STAGE_MANAGER_MAXIMIZED", "STAGE_MANAGER_PORTRAIT_WINDOW", "PORTRAIT_FULLSCREEN"
+    }:
         from .rename_controls_v20 import tap_ocr_control
 
         labels = (
@@ -250,6 +318,11 @@ def _tap(proxy: SafeProxy, key: str) -> None:
         if last_error is not None:
             raise last_error
     x_ratio, y_ratio, label, expected = ANCHORS[key]
+    if (
+        ORIENTATION == "STAGE_MANAGER_PORTRAIT_WINDOW"
+        and key in {"APPRAISAL_DIALOG", "APPRAISAL_CLOSE"}
+    ):
+        y_ratio = _PORTRAIT_WINDOW_APPRAISAL_DIALOG_Y
     if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and observation.width > observation.height:
         x, y = upright_ratio_to_touch(
             observation.width,
@@ -257,6 +330,16 @@ def _tap(proxy: SafeProxy, key: str) -> None:
             x_ratio,
             y_ratio,
             geometry=current_stage_geometry(proxy),
+        )
+    elif (
+        ORIENTATION == "STAGE_MANAGER_PORTRAIT_WINDOW"
+        and observation.width > observation.height
+    ):
+        x, y = upright_ratio_to_touch(
+            observation.width,
+            observation.height,
+            x_ratio,
+            y_ratio,
         )
     else:
         x, y = observation.width * x_ratio, observation.height * y_ratio
@@ -282,6 +365,13 @@ def upright_ratio_to_touch(
 ) -> tuple[float, float]:
     """Map canonical OCR/CV coordinates into the active touch window."""
 
+    if ORIENTATION == "PORTRAIT_FULLSCREEN":
+        # The MCP declares the same point bounds as its landscape profile,
+        # but its screenshot is already the complete, normalized game frame.
+        # Its screen-point tools use that normalized frame as well: no Stage
+        # Manager crop or 90-degree conversion is applicable.
+        return observation_width * x_ratio, observation_height * y_ratio
+
     if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and observation_width > observation_height:
         if geometry is not None:
             return stage_manager_upright_ratio_to_touch(
@@ -298,7 +388,108 @@ def upright_ratio_to_touch(
         # The portrait game surface is rotated clockwise in the landscape
         # Stage Manager window: portrait (x, y) -> window (1-y, x).
         return left + width * (1.0 - y_ratio), top + height * x_ratio
+    if (
+        ORIENTATION == "STAGE_MANAGER_PORTRAIT_WINDOW"
+        and observation_width > observation_height
+    ):
+        raw_x = observation_width * (
+            _PORTRAIT_WINDOW_LEFT
+            + (_PORTRAIT_WINDOW_RIGHT - _PORTRAIT_WINDOW_LEFT) * x_ratio
+        )
+        raw_y = observation_height * (
+            _PORTRAIT_WINDOW_TOP
+            + (_PORTRAIT_WINDOW_BOTTOM - _PORTRAIT_WINDOW_TOP) * y_ratio
+        )
+        if _PORTRAIT_WINDOW_INPUT_MAPPING == "digitizer_normalized":
+            return (
+                (observation_height - raw_y) * observation_width / observation_height,
+                raw_x * observation_height / observation_width,
+            )
+        if _PORTRAIT_WINDOW_INPUT_MAPPING == "ax_rotated":
+            # The current iPad7,2 profile: inverse portrait capture -> HID
+            # landscape points.  The target is still validated by a fresh
+            # screenshot before the next action is permitted.
+            return observation_height - raw_y, raw_x
+        if _PORTRAIT_WINDOW_INPUT_MAPPING == "legacy_rotated":
+            return portrait_window_legacy_rotated_touch(
+                observation_width, observation_height, x_ratio, y_ratio
+            )
+        # iPad7,2's current MCP capture shows an upright game window inside
+        # the landscape Stage Manager surface.  The screen-point API follows
+        # that same unrotated surface: its detail pager must therefore remain
+        # horizontal *inside the visible window*.  The former 90° transform
+        # turned a visual left/right pager swipe into a vertical drag through
+        # the title sheet, which the game correctly ignored as a page change.
+        # Keep the mapping a plain calibrated rectangle for every write.
+        return raw_x, raw_y
     return observation_width * x_ratio, observation_height * y_ratio
+
+
+def portrait_window_legacy_rotated_touch(
+    observation_width: float,
+    observation_height: float,
+    x_ratio: float,
+    y_ratio: float,
+) -> tuple[float, float]:
+    """Historical iPad7,2 HID transform, used only after a verified retry."""
+
+    return (
+        observation_width
+        * (
+            _PORTRAIT_WINDOW_LEFT
+            + (_PORTRAIT_WINDOW_RIGHT - _PORTRAIT_WINDOW_LEFT) * (1.0 - y_ratio)
+        ),
+        observation_height
+        * (
+            _PORTRAIT_WINDOW_TOP
+            + (_PORTRAIT_WINDOW_BOTTOM - _PORTRAIT_WINDOW_TOP) * x_ratio
+        ),
+    )
+
+
+def portrait_window_visible_touch(
+    observation_width: float,
+    observation_height: float,
+    x_ratio: float,
+    y_ratio: float,
+) -> tuple[float, float]:
+    """Return the visible landscape screenshot point for an iPad7,2 anchor."""
+
+    return (
+        observation_width
+        * (
+            _PORTRAIT_WINDOW_LEFT
+            + (_PORTRAIT_WINDOW_RIGHT - _PORTRAIT_WINDOW_LEFT) * x_ratio
+        ),
+        observation_height
+        * (
+            _PORTRAIT_WINDOW_TOP
+            + (_PORTRAIT_WINDOW_BOTTOM - _PORTRAIT_WINDOW_TOP) * y_ratio
+        ),
+    )
+
+
+def portrait_window_ax_rotated_touch(
+    observation_width: float,
+    observation_height: float,
+    x_ratio: float,
+    y_ratio: float,
+) -> tuple[float, float]:
+    """Map visible iPad7,2 window pixels into its portrait AX input space."""
+
+    raw_x, raw_y = portrait_window_visible_touch(
+        observation_width, observation_height, x_ratio, y_ratio
+    )
+    return observation_height - raw_y, raw_x
+
+
+def set_portrait_window_input_mapping(mapping: str) -> None:
+    """Adopt a portrait-window map only after harmless visual calibration."""
+
+    if mapping not in {"digitizer_normalized", "ax_rotated", "direct", "legacy_rotated"}:
+        raise ValueError(f"unsupported portrait window input mapping: {mapping}")
+    global _PORTRAIT_WINDOW_INPUT_MAPPING
+    _PORTRAIT_WINDOW_INPUT_MAPPING = mapping
 
 
 def _remember_stage_geometry(proxy: SafeProxy, snapshot: Snapshot) -> None:
@@ -336,7 +527,15 @@ def _remember_stage_geometry(proxy: SafeProxy, snapshot: Snapshot) -> None:
         pass
 
 
-def current_stage_geometry(proxy: SafeProxy) -> StageManagerGeometry:
+def current_stage_geometry(proxy: SafeProxy) -> StageManagerGeometry | None:
+    # iPad7,2 exposes Pokémon GO as a fixed upright Stage Manager window in a
+    # landscape capture.  Its window bounds were independently device-gated
+    # and are mapped in ``upright_ratio_to_touch``; attempting the older
+    # edge-detector (which expects the sideways iPad14,6 card) would reject a
+    # valid detail page and leave the worker unable to swipe.  ``None`` is the
+    # explicit signal to use that fixed, calibrated mapping.
+    if ORIENTATION == "STAGE_MANAGER_PORTRAIT_WINDOW":
+        return None
     geometry = getattr(proxy, "_stage_manager_geometry", None)
     if not isinstance(geometry, StageManagerGeometry):
         reason = getattr(proxy, "_stage_manager_geometry_error", None)
@@ -357,6 +556,13 @@ def _ensure_stage_geometry_for_state(
     state_reader: Callable[[Snapshot], str] | None = None,
 ) -> Snapshot:
     """Read fresh frames until geometry is stable without changing pages."""
+
+    if ORIENTATION == "STAGE_MANAGER_PORTRAIT_WINDOW":
+        # The iPad7,2 profile has no dynamically movable game card: its
+        # portrait window is the device-gated calibrated rectangle.  The
+        # caller has already classified this same fresh frame, so no legacy
+        # Stage Manager edge detection is required before a mapped touch.
+        return snapshot
 
     for attempt in range(1, attempts + 1):
         _remember_stage_geometry(proxy, snapshot)
@@ -394,7 +600,7 @@ def _next_snapshot(proxy: SafeProxy, delay: float = 2.5) -> Snapshot:
 
 
 def _validate_expected(state: str, snapshot: Snapshot) -> None:
-    if ORIENTATION == "STAGE_MANAGER_MAXIMIZED" and state in {
+    if ORIENTATION in {"STAGE_MANAGER_MAXIMIZED", "STAGE_MANAGER_PORTRAIT_WINDOW"} and state in {
         "MAIN_MENU",
         "INVENTORY",
         "DETAIL",
@@ -414,6 +620,30 @@ def _validate_expected(state: str, snapshot: Snapshot) -> None:
             "DETAIL": "点击第一张卡片后没有验证到详情页",
         }
         raise PolicyViolation(messages[state])
+
+    # The menu and Appraise overlay are navigation states too.  Previously
+    # they were merely announced after a successful MCP response, which let a
+    # Stage-Manager/HID no-op be treated as if the next tap could safely run.
+    # Require pixel-local evidence before advancing from either state; this is
+    # especially important on iPad7,2 where the service can acknowledge a
+    # touch whose injected coordinate never reaches the game window.
+    if state == "DETAIL_MENU":
+        if local_page_state(snapshot) != "DETAIL_MENU":
+            raise PolicyViolation("点击更多菜单后没有验证到“鉴定”菜单；不会继续点击")
+        return
+    if state == "APPRAISAL":
+        actual = local_page_state(snapshot)
+        if actual not in {"APPRAISAL_DIALOG", "APPRAISAL_BARS"}:
+            raise PolicyViolation("点击“鉴定”后没有验证到鉴定覆盖层；不会继续点击")
+        return
+    if state == "APPRAISAL_BARS":
+        if not snapshot.image:
+            raise PolicyViolation("鉴定条截图缺失；不会假定已进入鉴定")
+        try:
+            measure_ipad14_6_appraisal(snapshot.image, ORIENTATION)
+        except ValueError as exc:
+            raise PolicyViolation("鉴定覆盖层未显示可测量的 A/D/S 条；不会继续点击") from exc
+        return
 
     text = _normalized_text(snapshot)
     if state == "MAIN_MENU" and _bright_fraction(snapshot) < 0.50:
@@ -455,8 +685,32 @@ def navigate_to_appraisal(proxy: SafeProxy, snapshot: Snapshot) -> tuple[Snapsho
         _tap(proxy, current)
         snapshot = _next_snapshot(proxy)
         expected = ANCHORS[current][3]
+        for read_attempt in range(3):
+            try:
+                _validate_expected(expected, snapshot)
+                break
+            except PolicyViolation:
+                # A single accepted Appraise tap can leave the menu visible
+                # for a short transition. Re-observe only that same safe menu;
+                # never send a second tap, and never wait through an unknown
+                # or unrelated page. Announce "opened" only after verification.
+                if (
+                    expected != "APPRAISAL"
+                    or read_attempt == 2
+                    or local_page_state(snapshot) != "DETAIL_MENU"
+                ):
+                    raise
+                emit(
+                    "waiting",
+                    stage="等待鉴定菜单响应",
+                    reason="鉴定点击已发出，当前仍是详情菜单；只读复核，不重复点击。",
+                    attempt=read_attempt + 1,
+                    total=2,
+                    next_action="等待新截图验证鉴定覆盖层",
+                    user_action="无需操作；若菜单持续不变会安全停止。",
+                )
+                snapshot = _next_snapshot(proxy, 1.0)
         emit("navigation", state=expected, orientation=ORIENTATION, step=step)
-        _validate_expected(expected, snapshot)
 
     if not snapshot.image:
         # The MCP can occasionally return an empty capture immediately after

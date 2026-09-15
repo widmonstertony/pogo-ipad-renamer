@@ -235,7 +235,11 @@ class SafeProxy:
                 self.pending_name = normalize_text(str(upstream_args.get("text", "")))
             after = self.client.call_tool(
                 "describe_screen",
-                {"clickable_only": True, "include_ocr": True, "include_screenshot": False},
+                # The deterministic worker reads Pokémon GO pixels from its
+                # explicit screenshot channel.  Keep post-write safety
+                # observations independent of slow server-side whole-screen
+                # OCR, especially on a freshly connected iPad.
+                {"clickable_only": True, "include_ocr": False, "include_screenshot": False},
             )
             screen_info = self.client.call_tool("get_screen_info", {})
             observed_after = self._record_observation(after, screen_info)
@@ -297,7 +301,7 @@ class SafeProxy:
                 raise PolicyViolation(
                     "only the configured Pokemon GO bundle may launch or terminate"
                 )
-        elif name != "wake_and_home" and self.settings.pokemon_go_bundle_id.casefold() not in self.observation.text.casefold():
+        elif name != "wake_and_home" and not self._pokemon_go_is_foreground():
             raise PolicyViolation("Pokemon GO is not proven to be the foreground app")
 
         validate_bounds(name, arguments, self.observation)
@@ -305,8 +309,32 @@ class SafeProxy:
         if name == "press_key" and arguments.get("key") not in {"enter", "delete", "backspace"}:
             raise PolicyViolation("only enter/delete/backspace keyboard keys are allowed")
 
-        if self.pending_name and name in {"swipe_screen", "launch_app", "kill_app", "wake_and_home", "input_text", "type_text"}:
-            raise PolicyViolation("a rename is pending; confirm and verify it before navigation")
+        if self.pending_name and name in {
+            "swipe_screen",
+            "launch_app",
+            "kill_app",
+            "wake_and_home",
+            "input_text",
+            "type_text",
+        }:
+            # The rename worker performs one bounded fallback only after a
+            # fresh visual proof that the field still contains the untouched
+            # default species.  It must send the exact same deterministic
+            # nickname, remain on the same rename dialog, and cannot be used
+            # for navigation or a second arbitrary text injection.
+            same_verified_fallback = (
+                name == "type_text"
+                and normalize_text(str(arguments.get("text", "")))
+                == normalize_text(self.pending_name)
+                and metadata.get("_fallback_default_field_verified") is True
+                and metadata.get("_default_name_verified") is True
+                and normalize_text(str(metadata.get("_current_name", "")))
+                == normalize_text(str(metadata.get("_species", "")))
+            )
+            if not same_verified_fallback:
+                raise PolicyViolation(
+                    "a rename is pending; confirm and verify it before navigation"
+                )
 
         if name in {"input_text", "type_text"}:
             if not on_rename_screen(self.observation.text):
@@ -317,6 +345,38 @@ class SafeProxy:
             if not verified or current_name != species:
                 raise PolicyViolation("current name is not verified as the exact default species name")
             validate_poke_genie_name(str(arguments.get("text", "")), species)
+
+    def _pokemon_go_is_foreground(self) -> bool:
+        """Verify foreground state when iPad AX labels lag behind its pixels.
+
+        Stage Manager can leave Dock/card accessibility labels in a fresh
+        screenshot even though the local game crop and MCP's frontmost-app
+        service still identify Pokémon GO.  The original observation remains
+        required for bounds and token freshness; this narrowly adds a second
+        read-only foreground proof before a permitted write, rather than
+        trusting stale surrounding AX text or retrying a write.
+        """
+
+        assert self.observation is not None
+        bundle_id = self.settings.pokemon_go_bundle_id.casefold()
+        if bundle_id in self.observation.text.casefold():
+            return True
+        # The iOS service occasionally returns the Stage Manager/Dock context
+        # for a single foreground query while the immediately adjacent query
+        # correctly reports the game.  This is a read-only re-check, never a
+        # blind write: every candidate write still needs the fresh observation
+        # token and its normal bounds/intent validation.  A real app switch
+        # cannot pass unless this service itself reports Pokémon GO again.
+        for attempt in range(3):
+            try:
+                frontmost = self.client.call_tool("get_frontmost_app", {})
+            except Exception:
+                continue
+            if bundle_id in text_from_content(frontmost).casefold():
+                return True
+            if attempt < 2:
+                time.sleep(0.15)
+        return False
 
 
 class StdioMCPServer:

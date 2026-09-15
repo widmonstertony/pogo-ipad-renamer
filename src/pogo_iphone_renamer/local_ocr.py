@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
@@ -17,6 +19,10 @@ from .species_db import traditional_chinese_species
 class OCRLine:
     text: str
     confidence: float
+    # Coordinates are in the supplied image's pixel space.  Existing readers
+    # use only text/confidence; the optional bounds let navigation safely
+    # target a specific visible inventory card without guessing a grid cell.
+    bounds: tuple[float, float, float, float] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -29,17 +35,54 @@ def _engine():
     return RapidOCR()
 
 
+# Cache inference, never observations. New screenshots still receive unique
+# capture IDs and must pass the normal independent-frame checks. Keeping only
+# a pixel hash and immutable OCR lines bounds memory without retaining frames.
+_OCR_CACHE_LIMIT = 64
+_OCR_CACHE: OrderedDict[tuple, tuple[OCRLine, ...]] = OrderedDict()
+
+
 def ocr_image(image: Image.Image) -> tuple[OCRLine, ...]:
     import numpy as np
 
-    result = _engine()(np.asarray(image.convert("RGB")))
+    rgb = image.convert("RGB")
+    engine = _engine()
+    key = (engine, rgb.size, hashlib.sha256(rgb.tobytes()).digest())
+    if key in _OCR_CACHE:
+        _OCR_CACHE.move_to_end(key)
+        return _OCR_CACHE[key]
+    result = engine(np.asarray(rgb))
     texts = tuple(result.txts or ())
     scores = tuple(result.scores or ())
-    return tuple(
-        OCRLine(unicodedata.normalize("NFC", str(text)).strip(), float(score))
-        for text, score in zip(texts, scores)
+    boxes = tuple(result.boxes) if result.boxes is not None else ()
+
+    def bounds_for(box: object) -> tuple[float, float, float, float] | None:
+        try:
+            points = np.asarray(box, dtype=float).reshape(-1, 2)
+            if len(points) < 2:
+                return None
+            return (
+                float(points[:, 0].min()),
+                float(points[:, 1].min()),
+                float(points[:, 0].max()),
+                float(points[:, 1].max()),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    lines = tuple(
+        OCRLine(
+            unicodedata.normalize("NFC", str(text)).strip(),
+            float(score),
+            bounds_for(box),
+        )
+        for text, score, box in zip(texts, scores, boxes)
         if str(text).strip()
     )
+    _OCR_CACHE[key] = lines
+    while len(_OCR_CACHE) > _OCR_CACHE_LIMIT:
+        _OCR_CACHE.popitem(last=False)
+    return lines
 
 
 def ocr_mcp_screenshot(image_base64: str, orientation: str) -> tuple[OCRLine, ...]:
@@ -78,9 +121,10 @@ def rename_dialog_visible(lines: Iterable[OCRLine]) -> bool:
         text in visible
         for text in ("設定暱稱", "设定昵称", "設定暱稱。", "nickname", "set nickname")
     )
-    # iOS Chinese keyboard OCR often merges the adjacent input-assistant
-    # labels into one token (for example ``完成取消``).  The title and exact OK
-    # button remain independent, so accepting a token that *contains* Cancel
-    # still proves the complete rename dialog without guessing a coordinate.
-    has_cancel = any("取消" in text or "cancel" in text for text in visible)
-    return has_title and "ok" in visible and has_cancel
+    # iOS Chinese keyboard can crop or suppress the right-side “取消” label
+    # entirely.  “設定暱稱” plus the large, independent dialog OK control is
+    # already unique to Pokémon GO's rename modal; requiring Cancel as well
+    # misclassifies a visibly complete keyboard-open dialog as the main menu.
+    # When present, Cancel remains useful corroboration but is no longer a
+    # hard prerequisite for *read-only* dialog recognition.
+    return has_title and "ok" in visible

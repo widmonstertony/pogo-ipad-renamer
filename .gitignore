@@ -9,6 +9,7 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+:memory:.ses
 .patches/
 release/PokemonGO-Renamer.exe
 release/*-v*.cmd

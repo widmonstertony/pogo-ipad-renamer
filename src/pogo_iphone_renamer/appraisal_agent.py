@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -94,6 +96,10 @@ APPRAISAL_SCHEMA: dict[str, Any] = {
 class Snapshot:
     text: str
     image: str | None
+    # Each call to screen_snapshot is an independent MCP screenshot request.
+    # Pixel-identical frames are normal while a static detail page is open,
+    # especially on iPadOS 17's Stage Manager compositor.
+    capture_id: int = 0
 
 
 class StructuredVisionClient:
@@ -156,19 +162,45 @@ class StructuredVisionClient:
 
 
 def screen_snapshot(proxy: SafeProxy) -> Snapshot:
+    if os.getenv("POGO_RESET_MCP_SCREENSHOT_SESSION", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        # Start a new read session *before* describing the screen.  The
+        # description creates SafeProxy's observation token, and the
+        # screenshot below supplies the pixels used for coordinates.  Resetting
+        # between them paired a fresh image with a stale token/page, which on
+        # iPad7,2 could tap a different inventory card than the one shown.
+        reset_session = getattr(getattr(proxy, "client", None), "reset_read_session", None)
+        if callable(reset_session):
+            reset_session()
     description = proxy.call_tool(
         "describe_screen",
-        {"include_screenshot": False, "include_ocr": True, "clickable_only": False},
+        # The observation token and the pixels that calibrate a subsequent
+        # touch have to originate from exactly the same MCP response.  The
+        # iPad7,2 service can replay an older standalone ``screenshot`` even
+        # after a fresh ``describe_screen``; that split previously made the
+        # worker tap coordinates for a different Pokémon.  Request the
+        # capture inline so the SafeProxy token, local OCR and touch geometry
+        # share one atomic observation.  Server-side OCR stays disabled: the
+        # local offline OCR below is the authoritative reader.
+        {"include_screenshot": True, "include_ocr": False, "clickable_only": False},
     )
-    screenshot = proxy.call_tool("screenshot", {})
     description_message = tool_result_message("describe_screen", description)
-    screenshot_message = tool_result_message("screenshot", screenshot)
     text = str(description_message.get("content", ""))
     if len(text) > 22_000:
         text = text[:22_000] + "\n[screen text truncated]"
-    images = screenshot_message.get("images")
+    images = description_message.get("images")
+    if not isinstance(images, list) or not images:
+        # Keep older MCP servers usable, but mark this as a compatibility
+        # path.  Current iPad7,2 runs must use the atomic branch above.
+        screenshot = proxy.call_tool("screenshot", {})
+        screenshot_message = tool_result_message("screenshot", screenshot)
+        images = screenshot_message.get("images")
     image = str(images[-1]) if isinstance(images, list) and images else None
-    return Snapshot(text=text, image=image)
+    return Snapshot(text=text, image=image, capture_id=time.monotonic_ns())
 
 
 def navigation_prompt(snapshot: Snapshot, goal: str) -> str:
@@ -377,4 +409,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

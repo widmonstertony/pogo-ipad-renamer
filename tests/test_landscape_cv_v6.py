@@ -128,6 +128,23 @@ class LandscapeCVV6Tests(unittest.TestCase):
             (9, 12, 0),
         )
 
+    def test_avatar_joining_one_track_right_edge_keeps_two_decoder_measurement(self) -> None:
+        image = synthetic_appraisal((13, 10, 15))
+        draw = ImageDraw.Draw(image)
+        # Reproduce the saved 藏飽栗鼠 appraisal: foreground artwork joins the
+        # full HP bar past its physical right endpoint.  The endpoint reader
+        # deliberately searches only the divider-derived bar span and the
+        # 15-cell reader samples within that same span.
+        draw.rectangle((364, 1177, 433, 1185), fill=(210, 130, 133))
+
+        result = measure_upright_appraisal_v6(image)
+
+        self.assertEqual(
+            (result.attack, result.defense, result.stamina),
+            (13, 10, 15),
+        )
+        self.assertEqual(result.confidence, 0.82)
+
 
 if __name__ == "__main__":
     unittest.main()

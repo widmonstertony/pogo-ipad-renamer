@@ -48,7 +48,10 @@ def dismiss_active_keyboard(proxy: SafeProxy) -> bool:
     # visible above the keyboard, so submission can safely use that instead.
     from . import ipad_landscape_agent as base
 
-    if base.ORIENTATION == "STAGE_MANAGER_MAXIMIZED":
+    if base.ORIENTATION in {
+        "STAGE_MANAGER_MAXIMIZED",
+        "STAGE_MANAGER_PORTRAIT_WINDOW",
+    }:
         return False
     point = exact_accessibility_tap_point(proxy, "收起键盘")
     if point is None:

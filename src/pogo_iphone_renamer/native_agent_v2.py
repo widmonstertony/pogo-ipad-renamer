@@ -22,6 +22,16 @@ class ResilientStreamableHTTPClient(StreamableHTTPClient):
         self.session_id = None
         self._initialized = False
 
+    def reset_read_session(self) -> None:
+        """Start the next read in a new MCP session without replaying a write.
+
+        Some iPadOS 17 Stage Manager builds cache screenshots per streamable
+        HTTP session.  The batch uses this only before a read; it never resets
+        or retries a user-visible write.
+        """
+
+        self._reset_session()
+
     def list_tools(self) -> list[dict[str, Any]]:
         last_error: Exception | None = None
         for attempt in range(2):

@@ -31,6 +31,24 @@ class LocatedText:
     image_height: int
 
 
+def _deduplicate_overlapping_boxes(
+    boxes: list[OCRTextBox], *, image_width: int, image_height: int
+) -> list[OCRTextBox]:
+    """Merge the same physical text returned by multiple OCR scale passes."""
+
+    unique: list[OCRTextBox] = []
+    for box in sorted(boxes, key=lambda item: item.confidence, reverse=True):
+        center_x = (box.left + box.right) / 2.0
+        if any(
+            abs(center_x - (seen.left + seen.right) / 2.0) <= image_width * 0.03
+            and abs(box.center_y - seen.center_y) <= image_height * 0.03
+            for seen in unique
+        ):
+            continue
+        unique.append(box)
+    return unique
+
+
 def ocr_text_boxes(image: Image.Image) -> tuple[OCRTextBox, ...]:
     import numpy as np
 
@@ -63,6 +81,7 @@ def locate_exact_text_from_mcp(
     exact_text: str,
     *,
     minimum_confidence: float = 0.85,
+    search_region: tuple[float, float, float, float] | None = None,
 ) -> LocatedText:
     normalized = unicodedata.normalize("NFC", exact_text).strip()
     upright = rotate_mcp_image_upright(image_base64, orientation)
@@ -71,9 +90,60 @@ def locate_exact_text_from_mcp(
         for box in ocr_text_boxes(upright)
         if box.text == normalized and box.confidence >= minimum_confidence
     ]
+    if search_region is not None:
+        left, top, right, bottom = search_region
+        matches = [box for box in matches
+                   if left <= (box.left + box.right) / (2 * upright.width) <= right
+                   and top <= box.center_y / upright.height <= bottom]
+        if not matches:
+            # The full-frame OCR pass occasionally simplifies one Traditional
+            # Chinese glyph in the large rename field (for example 蟲 -> 虫),
+            # even though the same pixels are exact when read at a larger
+            # scale.  Keep the policy strict: crop only the caller-approved
+            # control region and accept only the original exact string.
+            crop_left = max(0, min(upright.width, round(left * upright.width)))
+            crop_top = max(0, min(upright.height, round(top * upright.height)))
+            crop_right = max(crop_left + 1, min(upright.width, round(right * upright.width)))
+            crop_bottom = max(crop_top + 1, min(upright.height, round(bottom * upright.height)))
+            region = upright.crop((crop_left, crop_top, crop_right, crop_bottom))
+            candidates: list[OCRTextBox] = []
+            variants: tuple[tuple[Image.Image, float], ...] = (
+                (region.resize((region.width * 2, region.height * 2)), 2.0),
+                (
+                    ImageOps.autocontrast(region.convert("L"))
+                    .convert("RGB")
+                    .resize((region.width * 3, region.height * 3)),
+                    3.0,
+                ),
+            )
+            for variant, scale in variants:
+                candidates.extend(
+                    _remap_crop_box(
+                        box,
+                        crop_left=crop_left,
+                        crop_top=crop_top,
+                        scale=scale,
+                    )
+                    for box in ocr_text_boxes(variant)
+                )
+            matches = [
+                box
+                for box in candidates
+                if box.text == normalized
+                and box.confidence >= minimum_confidence
+                and left
+                <= (box.left + box.right) / (2 * upright.width)
+                <= right
+                and top <= box.center_y / upright.height <= bottom
+            ]
+            matches = _deduplicate_overlapping_boxes(
+                matches,
+                image_width=upright.width,
+                image_height=upright.height,
+            )
     if not matches:
         raise PolicyViolation(f"详情页未定位到精确名称文字框：{normalized}")
-    if len(matches) > 1:
+    if len(matches) > 1 and search_region is None:
         matches = [
             box
             for box in matches

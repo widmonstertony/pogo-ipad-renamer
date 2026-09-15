@@ -45,6 +45,16 @@ class ResilientClientTests(unittest.TestCase):
         self.assertIsNone(client.session_id)
         self.assertFalse(client._initialized)
 
+    def test_explicit_read_session_reset_does_not_issue_a_tool_call(self) -> None:
+        client = ResilientStreamableHTTPClient(settings())
+        client.session_id = "cached-screenshot-session"
+        client._initialized = True
+
+        client.reset_read_session()
+
+        self.assertIsNone(client.session_id)
+        self.assertFalse(client._initialized)
+
     def test_write_is_never_retried(self) -> None:
         client = ResilientStreamableHTTPClient(settings())
         with patch.object(

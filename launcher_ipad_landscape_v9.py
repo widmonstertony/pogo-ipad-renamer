@@ -9,7 +9,7 @@ SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
-from pogo_iphone_renamer.gui_ipad_landscape_v9 import main
+from pogo_iphone_renamer.macos_launcher import main
 
 
 if __name__ == "__main__":

@@ -17,6 +17,21 @@ from .server import SafeProxy
 _MANUAL_UNLOCK_TIMEOUT: float | None = None
 
 
+class DeviceLockRecoveryRequired(PolicyViolation):
+    """Signal that a locked device invalidated an in-progress UI action.
+
+    Returning a fresh frame after an unlock is sufficient for a read-only
+    caller, but it is not sufficient for a caller that was about to type or
+    tap.  The latter must re-enter through its explicit recovery path instead
+    of continuing an old dialog interaction against a newly composed iPad
+    surface.
+    """
+
+    def __init__(self, snapshot: Snapshot) -> None:
+        super().__init__("iPad 已解锁；锁屏前的页面操作已失效，必须重新安全验证")
+        self.snapshot = snapshot
+
+
 def _persist_capture_wait_enabled() -> bool:
     """Keep a headless direct-detail task alive through a lost frame stream."""
 
@@ -62,7 +77,12 @@ def wait_for_manual_unlock(
     )
 
 
-def wait_for_unlocked_snapshot(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot:
+def wait_for_unlocked_snapshot(
+    proxy: SafeProxy,
+    snapshot: Snapshot,
+    *,
+    require_safe_reentry: bool = False,
+) -> Snapshot:
     """Return a fresh snapshot only after the device is unlocked and on.
 
     The patched MCP intentionally returns a truthful lock-screen image instead
@@ -76,7 +96,10 @@ def wait_for_unlocked_snapshot(proxy: SafeProxy, snapshot: Snapshot) -> Snapshot
     if not locked and screen_on:
         return snapshot
     wait_for_manual_unlock(proxy)
-    return screen_snapshot(proxy)
+    unlocked = screen_snapshot(proxy)
+    if require_safe_reentry:
+        raise DeviceLockRecoveryRequired(unlocked)
+    return unlocked
 
 
 def refresh_game_foreground_capture(proxy: SafeProxy) -> Snapshot:
