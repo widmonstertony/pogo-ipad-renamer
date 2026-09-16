@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pogo-iphone-renamer"
 version = "0.1.0"
 description = "Deterministic local OCR assistant for supervised Pokemon GO appraisal renaming"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "onnxruntime>=1.20",

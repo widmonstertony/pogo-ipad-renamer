@@ -1,110 +1,197 @@
-# Pokémon GO iPad 横屏整理助手
+# Pokémon GO iPad Rename Assistant
 
-一个完全本地、确定性的 Python 桌面程序：通过局域网 iOS MCP 读取 iPad 上的
-Pokémon GO，识别繁中名称和游戏自带鉴定条，只给仍使用完整默认名称的宝可梦添加
-IV 昵称；已有自定义/IV 昵称原样保留并自动继续下一只。
+[Traditional Chinese](README.zh-Hant.md) · [Getting started](docs/getting-started.md) · [Reliability notes](docs/reliability.md)
 
-它不使用 Ollama 或任何本地/云端大模型。名称由 RapidOCR 识别，IV 由像素测量，
-点击只使用已校准锚点和当前截图验证。
+A local, deterministic desktop assistant that walks through Pokémon GO on an
+iPad and adds IV-based nicknames to Pokémon that still use their complete
+default Traditional Chinese species name.
 
-## 当前设备布局
+The assistant reads the game through an iOS MCP service on your local network.
+It uses RapidOCR for names and pixel measurements for the in-game appraisal
+bars. It does **not** use Ollama, a local language model, or a cloud model.
 
-- iPad14,6，iPadOS 16.1
-- iOS MCP 触控空间 1366×1024
-- Pokémon GO 在横屏/Stage Manager 布局中显示
-- 默认 MCP 地址：`http://127.0.0.1:8090/mcp`（请在 GUI 中改为设备实际地址）
+## What it does
 
-其他设备和分辨率必须重新校准；程序不会把未知方向当成可点击页面。
+- Starts from the current, confirmed Pokémon GO screen and continues through
+  Pokémon one at a time.
+- Renames only a Pokémon whose visible name is verified as its complete default
+  species/form name.
+- Preserves existing custom and IV nicknames without opening the rename field.
+- Measures Attack, Defense, Stamina, and total IV from the appraisal screen.
+- Verifies the original name before editing and verifies the final nickname
+  character by character after submission.
+- Supports a fixed batch size or an unlimited run.
+- Shows the current Pokémon, current screen, current step, live iPad preview,
+  counters, and any action required from the user.
+- Pauses at a safe boundary and resumes only after rechecking the current page.
+- Keeps a macOS batch running in a detached worker when the dashboard closes or
+  the Mac locks.
 
-## 主要行为
+When a name or IV cannot be read reliably, the Pokémon is left unchanged. The
+assistant never guesses.
 
-- 批量数量可有限或不限，并显示当前第几只、改名/跳过/不可读计数。
-- 可安全暂停：完成当前一只并回到详情页后暂停，继续时复核身份。
-- 已有昵称自动跳过，不打开改名框。
-- 鉴定不稳定时有限只读重测；单只仍不可读则保留原名并继续。
-- 翻页被游戏吞掉时，在重新证明仍为同一详情页后有限重试。
-- Windows 与 macOS 批次由独立后台进程临时保持电脑和显示器唤醒；Mac 锁屏或关闭控制窗口后仍继续，结束或停止后恢复。
-- 输入前逐字核验，提交后验证弹窗消失并返回详情页。
-- 不包含传送、强化、进化、定位修改、完整性绕过或反检测功能。
+## What it does not do
 
-## Windows 启动
+The project has no transfer, power-up, evolve, purify, trade, catch, battle,
+location-spoofing, integrity-bypass, or anti-detection features. It does not
+attempt to bypass a locked iPad. If the iPad locks, interaction waits until it
+is unlocked again.
 
-当前机器可双击：
+## Requirements
 
-```text
-启动 Pokémon GO 整理助手.cmd
+### macOS
+
+- Apple silicon Mac running macOS 27
+- Python 3.11 or later
+- Xcode or Xcode Command Line Tools, including the macOS 27 SDK
+- An iPad running Pokémon GO and a compatible iOS MCP service
+- The Mac and iPad on a trusted network where the Mac can reach the MCP URL
+
+The currently calibrated layouts use a 1366×1024 MCP touch space and include
+the supported full-screen and Stage Manager capture variants. Unknown screen
+geometry is rejected instead of being treated as safe to click.
+
+### Windows
+
+- Windows with Python 3.11 or later
+- The same compatible iPad/iOS MCP setup
+
+Windows uses the compatibility desktop interface. The current macOS experience
+is the primary interface.
+
+## Quick start on macOS
+
+1. Install Python 3.11+ and Xcode Command Line Tools:
+
+   ```bash
+   xcode-select --install
+   ```
+
+2. Clone or download this repository.
+
+3. Make sure Pokémon GO is open on the iPad and the iOS MCP health endpoint is
+   reachable from the Mac.
+
+4. Right-click and open:
+
+   ```text
+   启动-PokemonGO-整理助手-macOS.command
+   ```
+
+   If a ZIP download removed its executable permission, run once:
+
+   ```bash
+   chmod +x ./启动-PokemonGO-整理助手-macOS.command
+   ```
+
+5. In **Preferences**:
+
+   - enter the iOS MCP URL, including `/mcp`;
+   - click **Check connection**;
+   - choose a batch limit or enable **Unlimited**;
+   - click **Save connection & scope**.
+
+6. Return to **Task Overview** and choose **Start batch rename**.
+
+On first launch, the script creates `.venv`, installs the local OCR runtime,
+builds the native SwiftUI app, and opens it. Later launches reuse both the
+environment and app unless their sources have changed.
+
+The interface follows the system appearance and language by default. You can
+also choose English or Chinese and System, Light, or Dark appearance in
+**Preferences**; the selection is saved locally.
+
+See the full [Getting Started Guide](docs/getting-started.md) for MCP URL
+examples, screen preparation, status meanings, safe pause/resume behavior, and
+recovery steps.
+
+## Quick start on Windows
+
+Install the package once:
+
+```powershell
+python -m pip install -e .
 ```
 
-开发方式：安装 Python 3.11+，执行 `python -m pip install -e .`，然后运行：
+Then double-click:
+
+```text
+release\启动-PokemonGO-整理助手.cmd
+```
+
+For development, run:
 
 ```powershell
 python launch_desktop.py
 ```
 
-## macOS 启动
+## How safety and recovery work
 
-支持 Intel 与 Apple Silicon Mac。安装 Python 3.11+ 和 Xcode Command Line Tools
-（`xcode-select --install`），首次右键打开：
+- Every touch is tied to the latest verified screen and calibrated geometry.
+- A second desktop window cannot control the same iPad concurrently.
+- MCP transport loss is handled with bounded backoff; no write is replayed when
+  its result is unknown.
+- Black or stale capture frames are not treated as proof that the game closed.
+- A swallowed swipe or tap is retried only after the assistant proves that the
+  same safe page is still visible.
+- Pause finishes the current safe unit of work before stopping interaction.
+- Stop exits text-entry and dialog states before the worker ends.
+- Reopening the macOS app reconnects to the existing detached batch instead of
+  launching a second worker.
 
-```text
-启动-PokemonGO-整理助手-macOS.command
-```
+Runtime state, previews, diagnostics, and audit logs are stored under
+`.pogo-data/` and `.pogo-journal/`. They are ignored by Git.
 
-启动器会先在仓库内创建 `.venv`，安装 RapidOCR、ONNX Runtime 和 Pillow；随后构建
-并打开面向 macOS 27 的原生 SwiftUI App。界面使用系统标准控件、系统语义色和 SF Symbols；
-在“偏好设置”中可即时切换系统/浅色/深色外观，以及系统/中文/English 界面语言，选择会在
-下次启动时保留。依赖与界面源码没有变化时，后续双击不会再次联网或重新编译；也可临时用
-环境变量 `POGO_PYTHON` 指定解释器。
+## Development
 
-从 GitHub ZIP 下载后若双击没有执行权限，在终端运行一次：
+Install in editable mode:
 
 ```bash
-chmod +x ./启动-PokemonGO-整理助手-macOS.command
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
 ```
 
-macOS 与 iPad 必须能通过局域网互访；在 GUI 顶部填写 iOS MCP 的 `/mcp` 地址。
-批次期间由独立后台运行器使用系统自带 `caffeinate` 临时防止 Mac 与显示器睡眠；
-因此 macOS 锁屏或关闭控制窗口不会停止已启动的任务。重新打开 GUI 会识别运行中的
-后台批次，并可用“立即停止”请求它安全收尾。任务结束或停止后自动释放；设备全局锁
-使用 macOS 原生 `flock`，不会与第二个窗口同时触控 iPad。
+Run the test suite on macOS:
 
-## 测试
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s tests
+```
 
-Windows PowerShell：
+Run it in Windows PowerShell:
 
 ```powershell
 $env:PYTHONPATH="$PWD\src"
 python -m unittest discover -s tests
 ```
 
-macOS：
+## Project layout
 
-```bash
-PYTHONPATH="$PWD/src" .venv/bin/python -m unittest discover -s tests
-```
+- `macos/` — native SwiftUI app, icon renderer, and bundle configuration.
+- `src/pogo_iphone_renamer/batch_agent.py` — batch state-machine coordinator.
+- `batch_navigation.py`, `game_navigation.py` — verified detail navigation.
+- `name_recognition.py`, `text_localization.py` — name classification and OCR
+  geometry.
+- `appraisal_*.py` — appraisal location, decoding, calibration, and stable-frame
+  verification.
+- `rename_*.py`, `name_input.py` — rename dialog, exact input verification,
+  submission, and recovery.
+- `device_controller.py`, `device_recovery.py` — safe touch mapping and capture
+  recovery.
+- `legacy_gui*.py` — Windows compatibility interface.
+- `tests/` — regression tests organized around production modules.
 
-## 代码结构
+Historical numbered implementations and one-off experimental launchers have
+been removed. Git history is the source of previous versions.
 
-- `macos/`：原生 SwiftUI 界面、应用图标与 bundle 配置。
-- `src/pogo_iphone_renamer/batch_agent.py`：批处理状态机，只协调各职责模块。
-- `batch_navigation.py`、`game_navigation.py`：详情翻页与页面导航验证。
-- `name_recognition.py`、`text_localization.py`：名称分类和文字坐标识别。
-- `appraisal_*.py`：鉴定条定位、解码、校准和稳定帧复核。
-- `rename_*.py`、`name_input.py`：改名弹窗、输入核验、提交与恢复。
-- `device_controller.py`、`device_recovery.py`：安全触控映射、锁屏及截图恢复。
-- `legacy_gui*.py`：Windows 兼容桌面界面；macOS 不使用这些模块。
-- `tests/`：与生产模块同名的回归测试。
+## Privacy
 
-历史实验脚本和按版本号堆叠的实现已移除；版本历史由 Git 保存，不再通过
-`_v2`、`_v26` 之类的文件名维护。
+All OCR and appraisal processing runs locally. `.env`, `.venv`, `.pogo-data/`,
+and `.pogo-journal/` are ignored by Git. MCP addresses, screenshots, progress,
+and action journals are not committed to the repository.
 
-## 隐私与恢复
+## Risk notice
 
-`.env`、`.pogo-data/`、`.pogo-journal/` 和虚拟环境均被 Git 忽略。动作审计日志、
-诊断截图、MCP 地址设置和运行进度不会上传到仓库。任务可以从任意已验证详情页重启；
-因为已有昵称必定跳过，重复运行不会再次改写它们。
-
-## 风险
-
-自动操作 Pokémon GO 界面可能违反游戏服务条款并带来账号风险。越狱设备不受
-Niantic 支持。本项目不尝试规避检测；建议先用只读扫描和小批次验证布局。
+Automating the Pokémon GO interface may violate the game's Terms of Service and
+can put an account at risk. Jailbroken devices are not supported by Niantic.
+This project does not attempt to evade detection. Validate a device layout with
+a small supervised batch before starting a long run.
